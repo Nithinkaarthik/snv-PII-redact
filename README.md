@@ -58,6 +58,8 @@ The backend auto-loads `.env` from either location:
 - `backend/.env`
 - repository root `.env`
 
+Use `.env.example` as the template, then copy values into your local `.env`.
+
 Example `.env`:
 
 ```env
@@ -66,14 +68,15 @@ OPENROUTER_API_BASE=https://openrouter.ai/api/v1
 LLM_MODEL=openai/gpt-oss-safeguard-20b
 
 # optional OpenRouter metadata headers
-OPENROUTER_HTTP_REFERER=
-OPENROUTER_X_TITLE=snv-PII-redact
+OPENROUTER_SITE_URL=https://your-site.example
+OPENROUTER_SITE_NAME=snv-PII-redact
 ```
 
 Important:
 
 - Use the raw key value (do not prefix with `Bearer`).
 - `OPENAI_API_KEY` is accepted as a fallback if `OPENROUTER_API_KEY` is not set.
+- Legacy metadata names `OPENROUTER_HTTP_REFERER`, `OPENROUTER_X_OPENROUTER_TITLE`, and `OPENROUTER_X_TITLE` are still accepted.
 
 Useful tuning knobs:
 

@@ -28,6 +28,53 @@ from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
 
+def _strip_env_inline_comment(value: str) -> str:
+    in_single_quote = False
+    in_double_quote = False
+    escape_next = False
+
+    for index, char in enumerate(value):
+        if escape_next:
+            escape_next = False
+            continue
+
+        if char == "\\":
+            escape_next = True
+            continue
+
+        if char == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            continue
+
+        if char == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            continue
+
+        if char == "#" and not in_single_quote and not in_double_quote:
+            return value[:index].rstrip()
+
+    return value.rstrip()
+
+
+def _clean_env_value(raw_value: str) -> str:
+    value = _strip_env_inline_comment((raw_value or "").strip())
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        value = value[1:-1]
+    return value.strip()
+
+
+def _normalize_openrouter_api_key(raw_key: str) -> str:
+    key = _clean_env_value(raw_key)
+    if key.lower().startswith("bearer "):
+        key = key[7:].strip()
+
+    # OpenRouter keys are case-sensitive in practice and should begin with sk-or-.
+    if key.lower().startswith("sk-or-"):
+        key = f"sk-or-{key[6:]}"
+
+    return key
+
+
 def _load_local_env_files() -> None:
     backend_dir = Path(__file__).resolve().parent
     candidate_paths = [
@@ -41,7 +88,7 @@ def _load_local_env_files() -> None:
 
         try:
             for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-                line = raw_line.strip()
+                line = raw_line.lstrip("\ufeff").strip()
                 if not line or line.startswith("#"):
                     continue
 
@@ -53,12 +100,9 @@ def _load_local_env_files() -> None:
 
                 key, value = line.split("=", 1)
                 key = key.strip()
-                value = value.strip()
+                value = _clean_env_value(value)
                 if not key:
                     continue
-
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-                    value = value[1:-1]
 
                 os.environ.setdefault(key, value)
         except OSError as exc:
@@ -70,14 +114,13 @@ def _load_local_env_files() -> None:
 
 
 def _get_openrouter_api_key() -> str:
-    key = (os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
-    if key.lower().startswith("bearer "):
-        key = key[7:].strip()
-    return key.strip().strip('"').strip("'")
+    return _normalize_openrouter_api_key(
+        os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+    )
 
 
 def _normalize_openrouter_api_base(api_base: str) -> str:
-    cleaned = api_base.strip().strip('"').strip("'")
+    cleaned = _clean_env_value(api_base)
     if not cleaned:
         return DEFAULT_OPENROUTER_API_BASE
 
@@ -1224,18 +1267,26 @@ def _call_openrouter_chat_completion(
     endpoint = f"{normalized_base.rstrip('/')}/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "authentication": f"Bearer {api_key}",
-        "X-API-Key": api_key,
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
 
-    referer = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+    referer = _clean_env_value(
+        os.getenv("OPENROUTER_SITE_URL")
+        or os.getenv("OPENROUTER_HTTP_REFERER")
+        or ""
+    )
     if referer:
         headers["HTTP-Referer"] = referer
 
-    x_title = os.getenv("OPENROUTER_X_TITLE", "snv-PII-redact").strip()
+    x_title = _clean_env_value(
+        os.getenv("OPENROUTER_SITE_NAME")
+        or os.getenv("OPENROUTER_X_OPENROUTER_TITLE")
+        or os.getenv("OPENROUTER_X_TITLE")
+        or "snv-PII-redact"
+    )
     if x_title:
+        headers["X-OpenRouter-Title"] = x_title
         headers["X-Title"] = x_title
 
     payload: Dict[str, Any] = {
@@ -1276,7 +1327,7 @@ def _call_openrouter_chat_completion(
             raise RuntimeError(
                 "OpenRouter API error 401: Missing Authentication header. "
                 "Sent Authorization header, but upstream did not receive it. "
-                "Verify OPENROUTER_API_BASE is https://openrouter.ai/api/v1 and OPENROUTER_API_KEY is the raw token."
+                "Verify OPENROUTER_API_BASE is https://openrouter.ai/api/v1 and OPENROUTER_API_KEY is the raw token (without Bearer)."
             )
         raise RuntimeError(f"OpenRouter API error {response.status_code}: {message}")
 
