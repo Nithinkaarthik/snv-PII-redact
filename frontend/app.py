@@ -1,5 +1,6 @@
 import base64
 import os
+import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
@@ -10,6 +11,7 @@ import streamlit.components.v1 as components
 
 DEFAULT_API_URL = os.getenv("SANITIZE_API_URL", "http://localhost:8000/api/v1/sanitize")
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("SANITIZE_REQUEST_TIMEOUT", "240"))
+STATUS_AUTOPOLL_SECONDS = max(0.5, float(os.getenv("SANITIZE_STATUS_AUTOPOLL_SECONDS", "2.0")))
 
 
 def enqueue_sanitize_job(api_url: str, filename: str, payload: bytes) -> Dict[str, Any]:
@@ -166,6 +168,18 @@ def main() -> None:
 
     job_info = st.session_state.get("job_info")
     job_status = st.session_state.get("job_status")
+    auto_poll_error: Optional[str] = None
+
+    if job_info and job_status and job_status.get("status") in {"queued", "processing"}:
+        status_url = job_info.get("status_url")
+        if status_url:
+            try:
+                st.session_state["job_status"] = fetch_job_status(status_url)
+                job_status = st.session_state.get("job_status")
+            except Exception as exc:
+                auto_poll_error = str(exc)
+        else:
+            auto_poll_error = "Job status URL is missing."
 
     if job_info:
         st.info(f"Active Job ID: {job_info.get('job_id', '-')}")
@@ -174,7 +188,11 @@ def main() -> None:
     if job_status:
         current_status = job_status.get("status", "unknown")
         if current_status in {"queued", "processing"}:
-            st.info(f"Current status: {current_status}. Click 'Refresh Job Status' to update.")
+            st.info(
+                f"Current status: {current_status}. Auto-refreshing every {STATUS_AUTOPOLL_SECONDS:.1f} seconds."
+            )
+            if auto_poll_error:
+                st.warning(f"Auto-refresh failed: {auto_poll_error}")
         elif current_status == "failed":
             st.error(job_status.get("error", "Sanitization failed."))
         elif current_status == "completed":
@@ -215,6 +233,14 @@ def main() -> None:
             st.info("Redacted PDF is ready but could not be fetched yet. Try refreshing status.")
     else:
         st.info("The redacted PDF preview will appear here once the job is completed.")
+
+    if (
+        job_status
+        and job_status.get("status") in {"queued", "processing"}
+        and not auto_poll_error
+    ):
+        time.sleep(STATUS_AUTOPOLL_SECONDS)
+        st.rerun()
 
 
 if __name__ == "__main__":

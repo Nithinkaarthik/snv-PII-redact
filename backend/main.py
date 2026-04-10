@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import tempfile
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -139,6 +140,13 @@ _load_local_env_files()
 
 LOGGER = logging.getLogger("sanitize_pipeline")
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("presidio-analyzer").setLevel(logging.ERROR)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+warnings.filterwarnings(
+    "ignore",
+    message=r".*torch.utils\._pytree\._register_pytree_node.*",
+    category=FutureWarning,
+)
 
 TARGET_PII_ENTITIES: Optional[List[str]] = None
 MAX_FILE_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_MB", "30")) * 1024 * 1024
@@ -344,6 +352,7 @@ class WordSpan:
 @dataclass(frozen=True)
 class LLMQuoteCandidate:
     quote: str
+    category: str
     confidence: float
 
 
@@ -924,7 +933,7 @@ def run_llm_context_triage(
         if attempt > 1:
             retry_feedback = (
                 "Previous response was invalid. Return ONLY a top-level JSON array of "
-                "objects with quote and confidence."
+                "objects with quote, category, confidence."
             )
 
         try:
@@ -965,12 +974,12 @@ def run_llm_context_triage(
 
         if preview:
             warnings.append(
-                "LLM response did not contain a strict JSON array of quote-confidence objects "
+                "LLM response did not contain a strict JSON array of quote-category-confidence objects "
                 f"after {LLM_PARSE_MAX_RETRIES} attempts. Last response preview: {preview}"
             )
         else:
             warnings.append(
-                "LLM response did not contain a strict JSON array of quote-confidence objects "
+                "LLM response did not contain a strict JSON array of quote-category-confidence objects "
                 f"after {LLM_PARSE_MAX_RETRIES} attempts."
             )
         return [], warnings
@@ -981,7 +990,7 @@ def run_llm_context_triage(
         if not matches:
             continue
 
-        inferred_type = classify_llm_quote_type(candidate.quote)
+        inferred_type = _normalize_llm_category(candidate.category, candidate.quote)
         for start_char, end_char, similarity_score in matches:
             fuzzy_conf = max(0.0, min(1.0, similarity_score / 100.0))
             combined_conf = (candidate.confidence + fuzzy_conf) / 2.0
@@ -1216,21 +1225,22 @@ def _build_llm_messages(
     previous_response: str = "",
 ) -> List[Dict[str, str]]:
     system_prompt = (
-        "You extract confidentiality entities from legal and corporate documents.\n"
+        "You extract personally identifiable and sensitive information from documents.\n"
         "Output contract:\n"
         "1) Return a JSON array as the top-level value.\n"
-        "2) Each array item must be an object with exactly: quote, confidence.\n"
+        "2) Each array item must be an object with exactly: quote, category, confidence.\n"
         "3) quote must be verbatim text from input.\n"
-        "4) confidence must be numeric in range 0 to 1.\n"
-        "5) Do not return markdown, prose, code fences, or wrapper objects.\n"
-        "6) If nothing is found, return []."
+        "4) category must be a concise label (prefer UPPER_SNAKE_CASE) chosen by you.\n"
+        "5) category is open-ended; do not limit yourself to any fixed list.\n"
+        "6) confidence must be numeric in range 0 to 1.\n"
+        "7) Do not return markdown, prose, code fences, or wrapper objects.\n"
+        "8) If nothing is found, return []."
     )
 
     user_prompt = f"""
-Targets:
-1) Legal party names
-2) Financial penalty amounts
-3) Jurisdiction states
+Detect any personally identifiable or sensitive information in the document.
+Include names, addresses, phone/fax numbers, emails, identifiers, account numbers,
+legal references, locations, organization names, and other sensitive data when present.
 
 Return only the JSON array.
 
@@ -1457,15 +1467,23 @@ def _parse_llm_quote_candidates(raw_content: str) -> Tuple[List[LLMQuoteCandidat
     if items is None:
         return [], False
 
-    deduped: Dict[str, LLMQuoteCandidate] = {}
+    deduped: Dict[Tuple[str, str], LLMQuoteCandidate] = {}
     for item in items:
         quote = ""
+        category = ""
         confidence_raw: Any = 0.85
 
         if isinstance(item, str):
             quote = item.strip()
         elif isinstance(item, dict):
             quote = str(item.get("quote") or item.get("text") or "").strip()
+            category = str(
+                item.get("category")
+                or item.get("entity_type")
+                or item.get("type")
+                or item.get("label")
+                or ""
+            ).strip()
             confidence_raw = item.get("confidence", item.get("score", 0.85))
         else:
             continue
@@ -1478,12 +1496,46 @@ def _parse_llm_quote_candidates(raw_content: str) -> Tuple[List[LLMQuoteCandidat
             confidence_value = confidence_value / 100.0
         confidence_value = max(0.0, min(1.0, confidence_value))
 
-        key = re.sub(r"\s+", " ", quote).strip().lower()
+        normalized_quote = re.sub(r"\s+", " ", quote).strip().lower()
+        normalized_category = re.sub(r"\s+", " ", category).strip().lower()
+        key = (normalized_quote, normalized_category)
         existing = deduped.get(key)
         if existing is None or confidence_value > existing.confidence:
-            deduped[key] = LLMQuoteCandidate(quote=quote, confidence=confidence_value)
+            deduped[key] = LLMQuoteCandidate(
+                quote=quote,
+                category=category,
+                confidence=confidence_value,
+            )
 
     return list(deduped.values()), True
+
+
+def _normalize_llm_category(raw_category: str, quote: str) -> str:
+    cleaned = str(raw_category or "").strip()
+    if not cleaned:
+        return classify_llm_quote_type(quote)
+
+    cleaned = cleaned.replace("-", "_")
+    cleaned = re.sub(r"[^A-Za-z0-9_\s]", " ", cleaned)
+    cleaned = re.sub(r"\s+", "_", cleaned).strip("_").upper()
+    if not cleaned:
+        return classify_llm_quote_type(quote)
+
+    alias_map = {
+        "NAME": "PERSON",
+        "PERSON_NAME": "PERSON",
+        "FULL_NAME": "PERSON",
+        "COMPANY": "ORGANIZATION",
+        "ORG": "ORGANIZATION",
+        "PHONE": "PHONE_NUMBER",
+        "MOBILE": "PHONE_NUMBER",
+        "TELEPHONE": "PHONE_NUMBER",
+        "FAX": "FAX_NUMBER",
+        "ADDRESS": "STREET_ADDRESS",
+        "STATE": "JURISDICTION_STATE",
+        "AMOUNT": "FINANCIAL_AMOUNT",
+    }
+    return alias_map.get(cleaned, cleaned)
 
 
 def _prepare_text_for_presidio(canonical_text: str) -> Tuple[str, List[int]]:
