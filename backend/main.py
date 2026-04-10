@@ -917,6 +917,7 @@ def run_llm_context_triage(
 
     raw_content = ""
     candidates: List[LLMQuoteCandidate] = []
+    parse_succeeded = False
 
     for attempt in range(1, LLM_PARSE_MAX_RETRIES + 1):
         retry_feedback = ""
@@ -949,11 +950,15 @@ def run_llm_context_triage(
                 return [], warnings
             continue
 
-        candidates = _parse_llm_quote_candidates(raw_content)
-        if candidates:
+        candidates, parse_succeeded = _parse_llm_quote_candidates(raw_content)
+        if parse_succeeded:
             break
 
     if not candidates:
+        if parse_succeeded:
+            # A valid empty array means the model found no LLM entities, not a parse failure.
+            return [], warnings
+
         preview = re.sub(r"\s+", " ", raw_content).strip()
         if LLM_RETRY_PREVIEW_CHARS > 0:
             preview = preview[:LLM_RETRY_PREVIEW_CHARS]
@@ -1366,26 +1371,94 @@ def _call_openrouter_chat_completion(
     return parsed
 
 
-def _parse_llm_quote_candidates(raw_content: str) -> List[LLMQuoteCandidate]:
-    if not raw_content:
-        return []
+def _strip_markdown_code_fence(raw_content: str) -> str:
+    stripped = raw_content.strip()
+    if not stripped.startswith("```"):
+        return stripped
 
-    try:
-        parsed = json.loads(raw_content.strip())
-    except json.JSONDecodeError:
-        match = re.search(r"\[[\s\S]*\]", raw_content)
-        if not match:
-            return []
+    first_newline = stripped.find("\n")
+    if first_newline != -1:
+        stripped = stripped[first_newline + 1 :]
+
+    if stripped.endswith("```"):
+        stripped = stripped[:-3]
+
+    return stripped.strip()
+
+
+def _loads_json_maybe_nested(raw_content: str) -> Optional[Any]:
+    candidate = raw_content.strip()
+    if not candidate:
+        return None
+
+    for _ in range(2):
         try:
-            parsed = json.loads(match.group(0))
+            parsed = json.loads(candidate)
         except json.JSONDecodeError:
-            return []
+            return None
 
-    if not isinstance(parsed, list):
-        return []
+        if isinstance(parsed, str):
+            candidate = parsed.strip()
+            continue
+
+        return parsed
+
+    return None
+
+
+def _extract_items_from_llm_payload(payload: Any) -> Optional[List[Any]]:
+    if isinstance(payload, list):
+        return payload
+
+    if isinstance(payload, dict):
+        if any(key in payload for key in ("quote", "text", "value", "entity")):
+            return [payload]
+
+        for key in ("quotes", "results", "entities", "items", "data", "output", "candidates"):
+            nested_payload = payload.get(key)
+            nested_items = _extract_items_from_llm_payload(nested_payload)
+            if nested_items is not None:
+                return nested_items
+
+        for nested_payload in payload.values():
+            nested_items = _extract_items_from_llm_payload(nested_payload)
+            if nested_items is not None:
+                return nested_items
+
+    return None
+
+
+def _parse_llm_quote_candidates(raw_content: str) -> Tuple[List[LLMQuoteCandidate], bool]:
+    if not raw_content:
+        return [], False
+
+    payload: Optional[Any] = None
+    primary_text = raw_content.strip()
+    fenced_text = _strip_markdown_code_fence(primary_text)
+
+    for candidate_text in (primary_text, fenced_text):
+        if not candidate_text:
+            continue
+        payload = _loads_json_maybe_nested(candidate_text)
+        if payload is not None:
+            break
+
+    if payload is None:
+        array_match = re.search(r"\[[\s\S]*\]", raw_content)
+        if array_match:
+            payload = _loads_json_maybe_nested(array_match.group(0))
+
+    if payload is None:
+        object_match = re.search(r"\{[\s\S]*\}", raw_content)
+        if object_match:
+            payload = _loads_json_maybe_nested(object_match.group(0))
+
+    items = _extract_items_from_llm_payload(payload)
+    if items is None:
+        return [], False
 
     deduped: Dict[str, LLMQuoteCandidate] = {}
-    for item in parsed:
+    for item in items:
         quote = ""
         confidence_raw: Any = 0.85
 
@@ -1410,7 +1483,7 @@ def _parse_llm_quote_candidates(raw_content: str) -> List[LLMQuoteCandidate]:
         if existing is None or confidence_value > existing.confidence:
             deduped[key] = LLMQuoteCandidate(quote=quote, confidence=confidence_value)
 
-    return list(deduped.values())
+    return list(deduped.values()), True
 
 
 def _prepare_text_for_presidio(canonical_text: str) -> Tuple[str, List[int]]:

@@ -116,6 +116,12 @@ def main() -> None:
         st.session_state["redacted_pdf_bytes"] = None
     if "uploaded_filename" not in st.session_state:
         st.session_state["uploaded_filename"] = "document.pdf"
+    if "queue_success_message" not in st.session_state:
+        st.session_state["queue_success_message"] = None
+
+    queue_success_message = st.session_state.pop("queue_success_message", None)
+    if queue_success_message:
+        st.success(queue_success_message)
 
     st.header("Zone 1: Ingestion")
     api_url = st.text_input("Backend /sanitize endpoint", value=DEFAULT_API_URL)
@@ -141,7 +147,8 @@ def main() -> None:
 
                 if status_url:
                     st.session_state["job_status"] = fetch_job_status(status_url)
-                st.success(f"Job queued: {job_info.get('job_id', '-')}")
+                st.session_state["queue_success_message"] = f"Job queued: {job_info.get('job_id', '-')}"
+                st.rerun()
             except Exception as exc:
                 st.session_state["job_info"] = None
                 st.session_state["job_status"] = None
