@@ -1,287 +1,88 @@
 from __future__ import annotations
 
-import io
 import json
-import logging
 import os
 import re
-import tempfile
-import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Full, Queue
 from threading import Lock, Thread
-from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 from urllib.parse import urljoin
 from uuid import uuid4
 
 import fitz
-import pytesseract
 import requests
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from PIL import Image
 from pydantic import BaseModel, Field
 from rapidfuzz import fuzz
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-
-def _strip_env_inline_comment(value: str) -> str:
-    in_single_quote = False
-    in_double_quote = False
-    escape_next = False
-
-    for index, char in enumerate(value):
-        if escape_next:
-            escape_next = False
-            continue
-
-        if char == "\\":
-            escape_next = True
-            continue
-
-        if char == "'" and not in_double_quote:
-            in_single_quote = not in_single_quote
-            continue
-
-        if char == '"' and not in_single_quote:
-            in_double_quote = not in_double_quote
-            continue
-
-        if char == "#" and not in_single_quote and not in_double_quote:
-            return value[:index].rstrip()
-
-    return value.rstrip()
-
-
-def _clean_env_value(raw_value: str) -> str:
-    value = _strip_env_inline_comment((raw_value or "").strip())
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-        value = value[1:-1]
-    return value.strip()
-
-
-def _normalize_openrouter_api_key(raw_key: str) -> str:
-    key = _clean_env_value(raw_key)
-    if key.lower().startswith("bearer "):
-        key = key[7:].strip()
-
-    # OpenRouter keys are case-sensitive in practice and should begin with sk-or-.
-    if key.lower().startswith("sk-or-"):
-        key = f"sk-or-{key[6:]}"
-
-    return key
-
-
-def _load_local_env_files() -> None:
-    backend_dir = Path(__file__).resolve().parent
-    candidate_paths = [
-        backend_dir / ".env",
-        backend_dir.parent / ".env",
-    ]
-
-    for env_path in candidate_paths:
-        if not env_path.exists():
-            continue
-
-        try:
-            for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-                line = raw_line.lstrip("\ufeff").strip()
-                if not line or line.startswith("#"):
-                    continue
-
-                if line.lower().startswith("export "):
-                    line = line[7:].strip()
-
-                if "=" not in line:
-                    continue
-
-                key, value = line.split("=", 1)
-                key = key.strip()
-                value = _clean_env_value(value)
-                if not key:
-                    continue
-
-                os.environ.setdefault(key, value)
-        except OSError as exc:
-            logging.getLogger("sanitize_pipeline").warning(
-                "Failed to load environment file %s: %s",
-                str(env_path),
-                str(exc),
-            )
-
-
-def _get_openrouter_api_key() -> str:
-    return _normalize_openrouter_api_key(
-        os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+try:
+    from backend.config import (
+        BUSINESS_KEYWORD_PATTERN,
+        DEFAULT_LLM_MODEL,
+        DEFAULT_OPENROUTER_API_BASE,
+        DEFAULT_SPACY_MODEL,
+        FUZZY_MATCH_THRESHOLD,
+        IGNORE_JSON_KEYS,
+        JOB_STORAGE_DIR,
+        JOB_TTL_SECONDS,
+        LLM_PARSE_MAX_RETRIES,
+        LLM_REQUEST_TIMEOUT_SECONDS,
+        LLM_RETRY_PREVIEW_CHARS,
+        LLM_TEXT_CHAR_LIMIT,
+        LOGGER,
+        MAX_FILE_SIZE_BYTES,
+        MAX_JOB_QUEUE_SIZE,
+        MIN_ENTITY_CONFIDENCE,
+        NATIVE_TEXT_MIN_ALNUM,
+        TARGET_PII_ENTITIES,
+        US_STATE_ABBREVIATIONS,
+        US_STATE_NAMES,
+        _clean_env_value,
+        _get_openrouter_api_key,
+        _normalize_openrouter_api_base,
+    )
+except ImportError:
+    from config import (
+        BUSINESS_KEYWORD_PATTERN,
+        DEFAULT_LLM_MODEL,
+        DEFAULT_OPENROUTER_API_BASE,
+        DEFAULT_SPACY_MODEL,
+        FUZZY_MATCH_THRESHOLD,
+        IGNORE_JSON_KEYS,
+        JOB_STORAGE_DIR,
+        JOB_TTL_SECONDS,
+        LLM_PARSE_MAX_RETRIES,
+        LLM_REQUEST_TIMEOUT_SECONDS,
+        LLM_RETRY_PREVIEW_CHARS,
+        LLM_TEXT_CHAR_LIMIT,
+        LOGGER,
+        MAX_FILE_SIZE_BYTES,
+        MAX_JOB_QUEUE_SIZE,
+        MIN_ENTITY_CONFIDENCE,
+        NATIVE_TEXT_MIN_ALNUM,
+        TARGET_PII_ENTITIES,
+        US_STATE_ABBREVIATIONS,
+        US_STATE_NAMES,
+        _clean_env_value,
+        _get_openrouter_api_key,
+        _normalize_openrouter_api_base,
     )
 
-
-def _normalize_openrouter_api_base(api_base: str) -> str:
-    cleaned = _clean_env_value(api_base)
-    if not cleaned:
-        return DEFAULT_OPENROUTER_API_BASE
-
-    lowered = cleaned.lower().rstrip("/")
-    if lowered.endswith("/chat/completions"):
-        cleaned = cleaned[: -len("/chat/completions")]
-
-    root = cleaned.rstrip("/")
-    if root in {"https://openrouter.ai", "http://openrouter.ai"}:
-        cleaned = f"{root}/api/v1"
-
-    return cleaned
-
-
-_load_local_env_files()
-
-LOGGER = logging.getLogger("sanitize_pipeline")
-logging.basicConfig(level=logging.INFO)
-logging.getLogger("presidio-analyzer").setLevel(logging.ERROR)
-logging.getLogger("transformers").setLevel(logging.ERROR)
-warnings.filterwarnings(
-    "ignore",
-    message=r".*torch.utils\._pytree\._register_pytree_node.*",
-    category=FutureWarning,
-)
-
-TARGET_PII_ENTITIES: Optional[List[str]] = None
-MAX_FILE_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_MB", "30")) * 1024 * 1024
-MAX_JOB_QUEUE_SIZE = int(os.getenv("MAX_JOB_QUEUE_SIZE", "32"))
-JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "1800"))
-NATIVE_TEXT_MIN_ALNUM = int(os.getenv("NATIVE_TEXT_MIN_ALNUM", "20"))
-
-LLM_TEXT_CHAR_LIMIT = int(os.getenv("LLM_TEXT_CHAR_LIMIT", "20000"))
-DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-safeguard-20b")
-DEFAULT_OPENROUTER_API_BASE = os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
-LLM_REQUEST_TIMEOUT_SECONDS = int(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "60"))
-LLM_PARSE_MAX_RETRIES = max(1, int(os.getenv("LLM_PARSE_MAX_RETRIES", "3")))
-LLM_RETRY_PREVIEW_CHARS = int(os.getenv("LLM_RETRY_PREVIEW_CHARS", "220"))
-
-DEFAULT_SPACY_MODEL = os.getenv("PRESIDIO_SPACY_MODEL", "en_core_web_trf")
-MIN_ENTITY_CONFIDENCE = float(os.getenv("MIN_ENTITY_CONFIDENCE", "0.7"))
-FUZZY_MATCH_THRESHOLD = int(os.getenv("FUZZY_MATCH_THRESHOLD", "92"))
-
-IGNORE_JSON_KEYS: Set[str] = {"id", "filename", "metadata.item", "input.ke"}
-BUSINESS_KEYWORD_PATTERN = re.compile(
-    r"\b(?:inc|inc\.|llc|corp|corp\.|corporation|co|co\.|company|ltd|ltd\.|plc|bioventures|ventures)\b",
-    flags=re.IGNORECASE,
-)
-
-JOB_STORAGE_DIR = Path(
-    os.getenv("SANITIZE_JOB_STORAGE_DIR", str(Path(tempfile.gettempdir()) / "snv-pii-redact-jobs"))
-)
-
-US_STATE_NAMES = {
-    "alabama",
-    "alaska",
-    "arizona",
-    "arkansas",
-    "california",
-    "colorado",
-    "connecticut",
-    "delaware",
-    "florida",
-    "georgia",
-    "hawaii",
-    "idaho",
-    "illinois",
-    "indiana",
-    "iowa",
-    "kansas",
-    "kentucky",
-    "louisiana",
-    "maine",
-    "maryland",
-    "massachusetts",
-    "michigan",
-    "minnesota",
-    "mississippi",
-    "missouri",
-    "montana",
-    "nebraska",
-    "nevada",
-    "new hampshire",
-    "new jersey",
-    "new mexico",
-    "new york",
-    "north carolina",
-    "north dakota",
-    "ohio",
-    "oklahoma",
-    "oregon",
-    "pennsylvania",
-    "rhode island",
-    "south carolina",
-    "south dakota",
-    "tennessee",
-    "texas",
-    "utah",
-    "vermont",
-    "virginia",
-    "washington",
-    "west virginia",
-    "wisconsin",
-    "wyoming",
-    "district of columbia",
-}
-
-US_STATE_ABBREVIATIONS = {
-    "AL",
-    "AK",
-    "AZ",
-    "AR",
-    "CA",
-    "CO",
-    "CT",
-    "DE",
-    "FL",
-    "GA",
-    "HI",
-    "ID",
-    "IL",
-    "IN",
-    "IA",
-    "KS",
-    "KY",
-    "LA",
-    "ME",
-    "MD",
-    "MA",
-    "MI",
-    "MN",
-    "MS",
-    "MO",
-    "MT",
-    "NE",
-    "NV",
-    "NH",
-    "NJ",
-    "NM",
-    "NY",
-    "NC",
-    "ND",
-    "OH",
-    "OK",
-    "OR",
-    "PA",
-    "RI",
-    "SC",
-    "SD",
-    "TN",
-    "TX",
-    "UT",
-    "VT",
-    "VA",
-    "WA",
-    "WV",
-    "WI",
-    "WY",
-    "DC",
-}
+try:
+    from backend.models import BoundingBox, OCRWord, WordSpan
+    from backend.ocr import extract_words_with_coordinates
+    from backend.text_mapping import build_character_bbox_map, deduplicate_boxes, get_bboxes_for_offsets
+except ImportError:
+    from models import BoundingBox, OCRWord, WordSpan
+    from ocr import extract_words_with_coordinates
+    from text_mapping import build_character_bbox_map, deduplicate_boxes, get_bboxes_for_offsets
 
 JobStatus = Literal["queued", "processing", "completed", "failed"]
 
@@ -322,31 +123,6 @@ class SanitizeJobStatusResponse(BaseModel):
     warnings: List[str] = Field(default_factory=list)
     error: Optional[str] = None
     download_url: Optional[str] = None
-
-
-@dataclass(frozen=True)
-class BoundingBox:
-    page_number: int  # zero-indexed internally
-    x0: float
-    y0: float
-    x1: float
-    y1: float
-
-
-@dataclass(frozen=True)
-class OCRWord:
-    text: str
-    bbox: BoundingBox
-    line_key: str
-
-
-@dataclass(frozen=True)
-class WordSpan:
-    text: str
-    start_char: int
-    end_char: int
-    bbox: BoundingBox
-    line_key: str
 
 
 @dataclass(frozen=True)
@@ -625,223 +401,6 @@ def _validate_pdf_upload(file: UploadFile, payload: bytes) -> None:
         raise HTTPException(status_code=413, detail=f"PDF exceeds {max_mb} MB upload limit.")
     if not payload.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="Uploaded file is not a valid PDF stream.")
-
-
-def extract_words_with_coordinates(
-    pdf_bytes: bytes,
-) -> Tuple[List[OCRWord], Dict[str, List[BoundingBox]], Dict[str, List[BoundingBox]]]:
-    document = fitz.open(stream=pdf_bytes, filetype="pdf")
-    words: List[OCRWord] = []
-
-    try:
-        for page_number in range(document.page_count):
-            page = document[page_number]
-            native_words = _extract_page_words_pymupdf(page, page_number)
-
-            if _is_page_text_meaningful(native_words):
-                page_words = native_words
-            else:
-                ocr_words = _extract_page_words_tesseract(page, page_number)
-                if ocr_words:
-                    LOGGER.info("Fell back to OCR on page %s due to weak native text layer.", page_number + 1)
-                page_words = ocr_words if ocr_words else native_words
-
-            words.extend(page_words)
-    finally:
-        document.close()
-
-    word_coordinate_map, phrase_coordinate_map = build_coordinate_maps(words)
-    return words, word_coordinate_map, phrase_coordinate_map
-
-
-def _is_page_text_meaningful(page_words: Sequence[OCRWord]) -> bool:
-    if not page_words:
-        return False
-    flattened = "".join(word.text for word in page_words)
-    alnum_count = sum(1 for char in flattened if char.isalnum())
-    return alnum_count >= NATIVE_TEXT_MIN_ALNUM
-
-
-def _extract_page_words_pymupdf(page: fitz.Page, page_number: int) -> List[OCRWord]:
-    raw_words = page.get_text("words")
-    if not raw_words:
-        return []
-
-    sorted_words = sorted(raw_words, key=lambda item: (item[5], item[6], item[7]))
-    extracted: List[OCRWord] = []
-
-    for x0, y0, x1, y1, text, block_no, line_no, _word_no in sorted_words:
-        clean_text = str(text).strip()
-        if not clean_text:
-            continue
-        extracted.append(
-            OCRWord(
-                text=clean_text,
-                bbox=BoundingBox(
-                    page_number=page_number,
-                    x0=float(x0),
-                    y0=float(y0),
-                    x1=float(x1),
-                    y1=float(y1),
-                ),
-                line_key=f"pymupdf:{block_no}:{line_no}",
-            )
-        )
-    return extracted
-
-
-def _extract_page_words_tesseract(page: fitz.Page, page_number: int) -> List[OCRWord]:
-    matrix = fitz.Matrix(2.0, 2.0)
-    pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-    image = Image.open(io.BytesIO(pixmap.tobytes("png")))
-
-    try:
-        ocr_data = pytesseract.image_to_data(
-            image,
-            output_type=pytesseract.Output.DICT,
-            config="--oem 3 --psm 6",
-        )
-    except pytesseract.TesseractNotFoundError:
-        LOGGER.warning("Tesseract executable was not found on PATH.")
-        return []
-
-    extracted: List[OCRWord] = []
-    texts = ocr_data.get("text", [])
-    confs = ocr_data.get("conf", [])
-    lefts = ocr_data.get("left", [])
-    tops = ocr_data.get("top", [])
-    widths = ocr_data.get("width", [])
-    heights = ocr_data.get("height", [])
-    blocks = ocr_data.get("block_num", [])
-    paragraphs = ocr_data.get("par_num", [])
-    lines = ocr_data.get("line_num", [])
-
-    zoom_x = matrix.a
-    zoom_y = matrix.d
-
-    for index, raw_text in enumerate(texts):
-        clean_text = str(raw_text).strip()
-        if not clean_text:
-            continue
-
-        confidence = _safe_float(confs[index] if index < len(confs) else "-1", default=-1.0)
-        if confidence < 0:
-            continue
-
-        left = _safe_float(lefts[index] if index < len(lefts) else 0.0) / zoom_x
-        top = _safe_float(tops[index] if index < len(tops) else 0.0) / zoom_y
-        width = _safe_float(widths[index] if index < len(widths) else 0.0) / zoom_x
-        height = _safe_float(heights[index] if index < len(heights) else 0.0) / zoom_y
-        right = left + max(width, 0.0)
-        bottom = top + max(height, 0.0)
-
-        block_no = blocks[index] if index < len(blocks) else 0
-        paragraph_no = paragraphs[index] if index < len(paragraphs) else 0
-        line_no = lines[index] if index < len(lines) else 0
-
-        extracted.append(
-            OCRWord(
-                text=clean_text,
-                bbox=BoundingBox(
-                    page_number=page_number,
-                    x0=left,
-                    y0=top,
-                    x1=right,
-                    y1=bottom,
-                ),
-                line_key=f"tesseract:{block_no}:{paragraph_no}:{line_no}",
-            )
-        )
-
-    return extracted
-
-
-def build_coordinate_maps(
-    words: Sequence[OCRWord],
-) -> Tuple[Dict[str, List[BoundingBox]], Dict[str, List[BoundingBox]]]:
-    word_map: Dict[str, List[BoundingBox]] = {}
-    line_groups: Dict[Tuple[int, str], List[OCRWord]] = {}
-
-    for word in words:
-        word_map.setdefault(word.text, []).append(word.bbox)
-        line_groups.setdefault((word.bbox.page_number, word.line_key), []).append(word)
-
-    phrase_map: Dict[str, List[BoundingBox]] = {}
-    for (_page_number, _line_key), line_words in line_groups.items():
-        sorted_line_words = sorted(line_words, key=lambda item: item.bbox.x0)
-        phrase = " ".join(item.text for item in sorted_line_words).strip()
-        if not phrase:
-            continue
-        phrase_box = _merge_boxes([item.bbox for item in sorted_line_words])
-        phrase_map.setdefault(phrase, []).append(phrase_box)
-
-    return word_map, phrase_map
-
-
-def build_character_bbox_map(
-    words: Sequence[OCRWord],
-) -> Tuple[str, List[Tuple[int, int, BoundingBox]], List[WordSpan]]:
-    if not words:
-        return "", [], []
-
-    text_parts: List[str] = []
-    char_map: List[Tuple[int, int, BoundingBox]] = []
-    word_spans: List[WordSpan] = []
-
-    cursor = 0
-    previous_page = words[0].bbox.page_number
-    previous_line_key = words[0].line_key
-    previous_text = ""
-
-    for index, word in enumerate(words):
-        if index > 0:
-            if word.bbox.page_number != previous_page:
-                separator = "\n"
-            elif previous_text.endswith("-") and previous_line_key != word.line_key:
-                separator = ""
-            else:
-                separator = " "
-
-            text_parts.append(separator)
-            cursor += len(separator)
-
-        start_char = cursor
-        text_parts.append(word.text)
-        cursor += len(word.text)
-        end_char = cursor
-
-        char_map.append((start_char, end_char, word.bbox))
-        word_spans.append(
-            WordSpan(
-                text=word.text,
-                start_char=start_char,
-                end_char=end_char,
-                bbox=word.bbox,
-                line_key=word.line_key,
-            )
-        )
-
-        previous_page = word.bbox.page_number
-        previous_line_key = word.line_key
-        previous_text = word.text
-
-    return "".join(text_parts), char_map, word_spans
-
-
-def get_bboxes_for_offsets(
-    start_char: int,
-    end_char: int,
-    char_map: Sequence[Tuple[int, int, BoundingBox]],
-) -> List[BoundingBox]:
-    if end_char <= start_char:
-        return []
-
-    overlapping_boxes = [
-        bbox
-        for span_start, span_end, bbox in char_map
-        if span_start < end_char and span_end > start_char
-    ]
-    return deduplicate_boxes(sorted(overlapping_boxes, key=lambda box: (box.page_number, box.y0, box.x0)))
 
 
 def run_presidio_triage(
@@ -1186,37 +745,6 @@ def serialize_detections(detections: Sequence[Detection]) -> List[DetectedEntity
             )
         )
     return serialized
-
-
-def deduplicate_boxes(boxes: Sequence[BoundingBox]) -> List[BoundingBox]:
-    unique: List[BoundingBox] = []
-    seen = set()
-
-    for box in boxes:
-        key = (
-            box.page_number,
-            round(box.x0, 2),
-            round(box.y0, 2),
-            round(box.x1, 2),
-            round(box.y1, 2),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(box)
-
-    return unique
-
-
-def _merge_boxes(boxes: Sequence[BoundingBox]) -> BoundingBox:
-    first = boxes[0]
-    return BoundingBox(
-        page_number=first.page_number,
-        x0=min(box.x0 for box in boxes),
-        y0=min(box.y0 for box in boxes),
-        x1=max(box.x1 for box in boxes),
-        y1=max(box.y1 for box in boxes),
-    )
 
 
 def _build_llm_messages(
