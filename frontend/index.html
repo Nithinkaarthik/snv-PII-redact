@@ -1,15 +1,18 @@
 <!DOCTYPE html>
 <html class="dark" lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SNV PII Redact Console</title>
+  <title>SNV Redactor</title>
 
   <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
 
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700;800;900&display=swap"
+    rel="stylesheet" />
 
-  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap"
+    rel="stylesheet" />
 
   <script>
     tailwind.config = {
@@ -41,10 +44,10 @@
             "full": "0.75rem"
           },
           fontFamily: {
-            "headline": ["Space Grotesk", "sans-serif"],
-            "body": ["Inter", "sans-serif"],
-            "label": ["Space Grotesk", "sans-serif"],
-            "mono": ["JetBrains Mono", "monospace"]
+            "headline": ["Montserrat", "sans-serif"],
+            "body": ["Montserrat", "sans-serif"],
+            "label": ["Montserrat", "sans-serif"],
+            "mono": ["Montserrat", "sans-serif"]
           }
         }
       }
@@ -52,48 +55,174 @@
   </script>
 
   <style>
+    :root {
+      --liquid-amber-1: rgba(245, 158, 11, 0.2);
+      --liquid-amber-2: rgba(245, 158, 11, 0.1);
+      --liquid-glass: rgba(30, 30, 31, 0.72);
+    }
+
     body {
-      font-family: "Inter", sans-serif;
+      position: relative;
+      isolation: isolate;
+      overflow-x: hidden;
+      font-family: "Montserrat", sans-serif;
       background:
-        radial-gradient(circle at 8% 10%, rgba(245, 158, 11, 0.07), transparent 28%),
-        radial-gradient(circle at 92% 5%, rgba(245, 158, 11, 0.05), transparent 24%),
-        radial-gradient(circle at 70% 90%, rgba(245, 158, 11, 0.04), transparent 30%),
+        radial-gradient(circle at 10% 12%, rgba(245, 158, 11, 0.09), transparent 30%),
+        radial-gradient(circle at 88% 8%, rgba(245, 158, 11, 0.08), transparent 26%),
+        radial-gradient(circle at 72% 88%, rgba(245, 158, 11, 0.06), transparent 34%),
         #0A0A0B;
       background-size: 180% 180%, 170% 170%, 190% 190%, auto;
       animation: ambientDrift 22s ease-in-out infinite alternate;
     }
 
-    .font-headline { font-family: "Space Grotesk", sans-serif; }
-    .font-mono { font-family: "JetBrains Mono", monospace; }
-
-    .brand-3d {
-      position: relative;
-      display: inline-block;
-      letter-spacing: -0.02em;
-      color: #d6901b;
-      text-shadow:
-        0 1px 0 rgba(180, 83, 9, 0.9),
-        0 2px 0 rgba(146, 64, 14, 0.95),
-        0 3px 0 rgba(120, 53, 15, 0.95),
-        0 7px 14px rgba(0, 0, 0, 0.52);
+    body::before {
+      content: "";
+      position: fixed;
+      inset: -20% -10% auto -10%;
+      height: 70vh;
+      pointer-events: none;
+      z-index: -2;
+      background:
+        radial-gradient(circle at 18% 42%, var(--liquid-amber-1), transparent 45%),
+        radial-gradient(circle at 84% 25%, var(--liquid-amber-2), transparent 40%);
+      filter: blur(28px);
+      animation: floatClouds 20s ease-in-out infinite alternate;
     }
 
-    .brand-3d::after {
-      content: attr(data-text);
-      position: absolute;
+    body::after {
+      content: "";
+      position: fixed;
       inset: 0;
-      z-index: -1;
-      color: #451a03;
-      opacity: 0.38;
-      transform: translate(0.045em, 0.065em);
       pointer-events: none;
+      z-index: -1;
+      opacity: 0.2;
+      background-image:
+        linear-gradient(rgba(245, 158, 11, 0.08) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(245, 158, 11, 0.08) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: radial-gradient(circle at 50% 30%, black 25%, transparent 80%);
+    }
+
+    .font-headline {
+      font-family: "Montserrat", sans-serif;
+    }
+
+    .font-mono {
+      font-family: "Montserrat", sans-serif;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .brand-wordmark {
+      display: block;
+      letter-spacing: 0.11em;
+      font-family: "Montserrat", sans-serif;
+      font-weight: 800;
+      text-transform: uppercase;
+      background: linear-gradient(100deg, #f4f4f5 0%, #f8d486 45%, #f4f4f5 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      text-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+      position: relative;
+      padding-bottom: 0.18rem;
+    }
+
+    .brand-wordmark::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      bottom: -0.04rem;
+      transform: translateX(-50%);
+      width: 72%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(245, 158, 11, 0.65), transparent);
+    }
+
+    .brand-subtitle {
+      display: block;
+      margin-top: 0.15rem;
+      color: #a1a1aa;
+      letter-spacing: 0.14em;
+      font-family: "Montserrat", sans-serif;
+      font-size: 10px;
+      font-weight: 500;
+      text-transform: uppercase;
     }
 
     .material-symbols-outlined {
       font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
     }
 
-    .glass-panel { backdrop-filter: blur(24px); }
+    .glass-panel {
+      backdrop-filter: blur(24px);
+    }
+
+    .liquid-panel {
+      position: relative;
+      overflow: hidden;
+      backdrop-filter: blur(16px);
+      background: linear-gradient(165deg, var(--liquid-glass) 0%, rgba(19, 19, 20, 0.84) 80%);
+    }
+
+    .liquid-panel::before {
+      content: "";
+      position: absolute;
+      inset: -40% 35% 45% -25%;
+      pointer-events: none;
+      background: radial-gradient(circle, rgba(245, 158, 11, 0.14), transparent 72%);
+      transform: rotate(-8deg);
+    }
+
+    .liquid-panel>* {
+      position: relative;
+      z-index: 1;
+    }
+
+    .workflow-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.5rem;
+    }
+
+    .workflow-step {
+      border: 1px solid rgba(39, 39, 42, 0.4);
+      border-radius: 0.75rem;
+      background: rgba(15, 15, 16, 0.65);
+      color: #a1a1aa;
+      font-family: "Montserrat", sans-serif;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      text-align: center;
+      padding: 0.7rem 0.5rem;
+      transition: all 220ms ease;
+    }
+
+    .workflow-step.active {
+      border-color: rgba(245, 158, 11, 0.45);
+      background: rgba(245, 158, 11, 0.14);
+      color: #fbbf24;
+      box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.2) inset;
+    }
+
+    .workflow-step.done {
+      border-color: rgba(245, 158, 11, 0.25);
+      background: rgba(245, 158, 11, 0.1);
+      color: #f59e0b;
+    }
+
+    .next-action-chip {
+      margin-top: 0.5rem;
+      padding: 0.55rem 0.7rem;
+      border-radius: 0.65rem;
+      border: 1px solid rgba(245, 158, 11, 0.2);
+      background: rgba(245, 158, 11, 0.08);
+      color: #fcd34d;
+      font-family: "Montserrat", sans-serif;
+      font-size: 11px;
+      line-height: 1.35;
+    }
 
     .reveal {
       animation: revealUp 520ms ease forwards;
@@ -101,9 +230,17 @@
       transform: translateY(12px);
     }
 
-    .reveal-delay-1 { animation-delay: 80ms; }
-    .reveal-delay-2 { animation-delay: 140ms; }
-    .reveal-delay-3 { animation-delay: 200ms; }
+    .reveal-delay-1 {
+      animation-delay: 80ms;
+    }
+
+    .reveal-delay-2 {
+      animation-delay: 140ms;
+    }
+
+    .reveal-delay-3 {
+      animation-delay: 200ms;
+    }
 
     .motion-panel {
       transition: transform 280ms ease, border-color 280ms ease, box-shadow 280ms ease;
@@ -121,6 +258,92 @@
 
     .icon-float:hover {
       transform: translateY(-2px);
+    }
+
+    .icon-action-btn {
+      position: relative;
+      width: 2rem;
+      height: 2rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 0.6rem;
+      border: 1px solid rgba(39, 39, 42, 0.35);
+      background: rgba(19, 19, 20, 0.72);
+      color: #a1a1aa;
+      transition: color 200ms ease, border-color 200ms ease, background 200ms ease, transform 200ms ease;
+    }
+
+    .icon-action-btn:hover,
+    .icon-action-btn.active {
+      color: #f59e0b;
+      border-color: rgba(245, 158, 11, 0.45);
+      background: rgba(245, 158, 11, 0.12);
+      transform: translateY(-1px);
+    }
+
+    .icon-notif-badge {
+      position: absolute;
+      top: -0.32rem;
+      right: -0.3rem;
+      min-width: 1rem;
+      height: 1rem;
+      padding: 0 0.2rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      background: #f59e0b;
+      color: #451a03;
+      font-size: 9px;
+      font-weight: 800;
+      line-height: 1;
+      box-shadow: 0 0 0 1px rgba(10, 10, 11, 0.7);
+    }
+
+    .top-icon-panel {
+      position: absolute;
+      top: 2.65rem;
+      width: 22rem;
+      border-radius: 0.9rem;
+      border: 1px solid rgba(39, 39, 42, 0.5);
+      background: rgba(14, 14, 15, 0.96);
+      backdrop-filter: blur(14px);
+      box-shadow: 0 22px 36px rgba(0, 0, 0, 0.45);
+      overflow: hidden;
+      z-index: 60;
+    }
+
+    .top-icon-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.7rem 0.85rem;
+      border-bottom: 1px solid rgba(39, 39, 42, 0.45);
+      background: rgba(28, 28, 29, 0.88);
+    }
+
+    .notification-item {
+      border: 1px solid rgba(39, 39, 42, 0.5);
+      border-radius: 0.6rem;
+      padding: 0.6rem 0.65rem;
+      background: rgba(19, 19, 20, 0.75);
+    }
+
+    .notification-item.info {
+      border-color: rgba(245, 158, 11, 0.26);
+    }
+
+    .notification-item.success {
+      border-color: rgba(52, 211, 153, 0.35);
+    }
+
+    .notification-item.warning {
+      border-color: rgba(251, 191, 36, 0.4);
+    }
+
+    .notification-item.error {
+      border-color: rgba(239, 68, 68, 0.42);
     }
 
     .upload-zone {
@@ -253,6 +476,7 @@
       0% {
         background-position: 0% 0%, 100% 0%, 40% 100%, 0 0;
       }
+
       100% {
         background-position: 20% 18%, 82% 8%, 55% 88%, 0 0;
       }
@@ -266,10 +490,12 @@
     }
 
     @keyframes subtleGlow {
+
       0%,
       100% {
         box-shadow: 0 0 0 rgba(245, 158, 11, 0);
       }
+
       50% {
         box-shadow: 0 0 18px rgba(245, 158, 11, 0.14);
       }
@@ -280,6 +506,7 @@
         opacity: 0;
         transform: translateY(6px);
       }
+
       to {
         opacity: 1;
         transform: translateY(0);
@@ -291,6 +518,7 @@
         opacity: 0;
         transform: translateY(8px);
       }
+
       to {
         opacity: 1;
         transform: translateY(0);
@@ -304,16 +532,29 @@
     }
 
     @keyframes topProgressGlow {
+
       0%,
       100% {
         box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
       }
+
       50% {
         box-shadow: 0 0 14px rgba(245, 158, 11, 0.7);
       }
     }
 
+    @keyframes floatClouds {
+      0% {
+        transform: translate3d(-1.5%, -1.5%, 0) scale(1);
+      }
+
+      100% {
+        transform: translate3d(1.5%, 2%, 0) scale(1.05);
+      }
+    }
+
     @media (prefers-reduced-motion: reduce) {
+
       *,
       *::before,
       *::after {
@@ -323,24 +564,27 @@
     }
   </style>
 
-  <script src="/assets/app.js" defer></script>
+  <script src="/assets/app.js?v=20260411-1" defer
+    onerror="this.onerror=null; this.src='./app.js?v=20260411-1';"></script>
 </head>
+
 <body class="bg-background text-on-surface selection:bg-primary/30">
-  <header class="fixed top-0 z-50 relative flex justify-between items-center w-full px-6 h-16 bg-[#131314] border-b border-outline-variant/20">
-    <div class="flex items-center min-w-[160px]">
-      <nav class="hidden md:flex gap-6 items-center">
-        <a class="text-primary border-b-2 border-primary pb-1 font-label text-sm uppercase tracking-[0.05em] transition-colors duration-200">Dashboard</a>
-      </nav>
+  <header
+    class="fixed top-0 z-50 relative flex justify-between items-center w-full px-6 h-16 bg-surface/95 backdrop-blur-md border-b border-outline-variant/35">
+    <div class="flex items-center min-w-[200px]">
+      <span class="text-[11px] font-semibold uppercase tracking-[0.12em] text-on-surface-variant">SNV Redactor</span>
     </div>
 
-    <div class="pointer-events-none absolute left-1/2 -translate-x-1/2">
-      <span data-text="SNV Redaction Core" class="brand-3d text-xl font-bold tracking-tighter uppercase font-headline">SNV Redaction Core</span>
+    <div class="pointer-events-none absolute left-1/2 -translate-x-1/2 text-center">
+      <span class="brand-wordmark text-lg">SNV Redactor</span>
+      <span class="brand-subtitle">Document Sanitization Console</span>
     </div>
 
     <div class="flex items-center gap-4">
       <div class="hidden md:flex flex-col gap-1 w-36">
-        <div class="flex items-center justify-between text-[9px] font-mono uppercase tracking-widest text-on-surface-variant">
-          <span>PDF Flow</span>
+        <div
+          class="flex items-center justify-between text-[9px] font-mono uppercase tracking-widest text-on-surface-variant">
+          <span>Pipeline</span>
           <span id="topPdfProgressLabel" class="text-primary">idle</span>
         </div>
         <div class="top-pdf-progress-track h-1.5 rounded-full overflow-hidden">
@@ -348,10 +592,57 @@
         </div>
       </div>
 
-      <button id="topQueueBtn" class="primary-sheen bg-primary text-on-primary px-4 py-1.5 rounded-lg font-bold text-sm hover:bg-amber-400 active:scale-95 transition-all uppercase tracking-tighter">Queue Job</button>
-      <div class="flex gap-3 text-on-surface-variant">
-        <span class="icon-float material-symbols-outlined cursor-pointer hover:text-primary transition-colors">shield_lock</span>
-        <span class="icon-float material-symbols-outlined cursor-pointer hover:text-primary transition-colors">notifications</span>
+      <div class="relative flex gap-3 text-on-surface-variant">
+        <button id="securityBtn" type="button" class="icon-action-btn" aria-label="Toggle security snapshot">
+          <span class="material-symbols-outlined text-[19px]">shield_lock</span>
+        </button>
+
+        <button id="notificationsBtn" type="button" class="icon-action-btn" aria-label="Toggle notifications panel">
+          <span class="material-symbols-outlined text-[19px]">notifications</span>
+          <span id="notificationsBadge" class="icon-notif-badge hidden">0</span>
+        </button>
+
+        <section id="securityPanel" class="top-icon-panel hidden right-12" aria-label="Security Snapshot Panel">
+          <div class="top-icon-panel-header">
+            <div class="flex items-center gap-2">
+              <span class="material-symbols-outlined text-primary text-base">shield_lock</span>
+              <p class="text-[10px] font-semibold uppercase tracking-[0.12em] text-on-surface">Security Snapshot</p>
+            </div>
+          </div>
+          <div class="p-3 grid grid-cols-2 gap-2 text-[10px]">
+            <div class="p-2 rounded border border-outline-variant/30 bg-surface-container-lowest/60">
+              <p class="text-on-surface-variant uppercase tracking-widest">Status</p>
+              <p id="securityStatusValue" class="mt-1 text-primary font-semibold uppercase tracking-wider">idle</p>
+            </div>
+            <div class="p-2 rounded border border-outline-variant/30 bg-surface-container-lowest/60">
+              <p class="text-on-surface-variant uppercase tracking-widest">Job</p>
+              <p id="securityJobValue" class="mt-1 text-on-surface font-semibold tracking-wide">-</p>
+            </div>
+            <div class="p-2 rounded border border-outline-variant/30 bg-surface-container-lowest/60">
+              <p class="text-on-surface-variant uppercase tracking-widest">Entities</p>
+              <p id="securityEntityValue" class="mt-1 text-on-surface font-semibold tracking-wide">0</p>
+            </div>
+            <div class="p-2 rounded border border-outline-variant/30 bg-surface-container-lowest/60">
+              <p class="text-on-surface-variant uppercase tracking-widest">Warnings</p>
+              <p id="securityWarningValue" class="mt-1 text-on-surface font-semibold tracking-wide">0</p>
+            </div>
+          </div>
+          <div class="px-3 pb-3 text-[10px] text-on-surface-variant flex justify-between items-center">
+            <span>Last update</span>
+            <span id="securityUpdatedValue" class="font-mono text-primary tracking-wider">-</span>
+          </div>
+        </section>
+
+        <section id="notificationsPanel" class="top-icon-panel hidden right-0" aria-label="Notifications Panel">
+          <div class="top-icon-panel-header">
+            <p class="text-[10px] font-semibold uppercase tracking-[0.12em] text-on-surface">Notifications</p>
+            <button id="notificationsMarkRead" type="button"
+              class="text-[10px] text-primary hover:text-amber-300 uppercase tracking-widest">Mark Read</button>
+          </div>
+          <ul id="notificationsList" class="max-h-72 overflow-y-auto p-3 space-y-2">
+            <li class="text-[10px] text-on-surface-variant">No notifications yet.</li>
+          </ul>
+        </section>
       </div>
     </div>
   </header>
@@ -359,23 +650,31 @@
   <main class="mt-16 p-6 min-h-[calc(100vh-64px)] bg-background overflow-x-hidden">
     <div class="grid grid-cols-12 gap-6 max-w-[1600px] mx-auto">
       <section class="col-span-12 lg:col-span-4 reveal">
-        <div class="motion-panel bg-surface-container-low p-6 rounded-xl border border-outline-variant/10 shadow-lg h-full flex flex-col gap-6">
+        <div
+          class="motion-panel liquid-panel bg-surface-container-low p-6 rounded-xl border border-outline-variant/10 shadow-lg h-full flex flex-col gap-6">
           <div class="flex items-center justify-between">
-            <h3 class="text-xs font-label uppercase tracking-[0.1em] text-on-surface-variant font-bold">Zone 1: Ingestion</h3>
+            <h3 class="text-xs font-label uppercase tracking-[0.1em] text-on-surface-variant font-bold">Zone 1:
+              Ingestion</h3>
             <div class="flex gap-2">
               <span class="w-2 h-2 rounded-full bg-primary animate-pulse shadow-[0_0_8px_#F59E0B]"></span>
               <span class="text-[10px] font-mono text-primary uppercase tracking-widest">Active</span>
             </div>
           </div>
 
-          <div id="uploadZone" class="upload-zone border-2 border-dashed border-outline-variant/30 rounded-xl p-10 flex flex-col items-center justify-center text-center gap-4 bg-surface-container-lowest/50 transition-all duration-300 cursor-pointer group">
+          <div id="uploadZone"
+            class="upload-zone border-2 border-dashed border-outline-variant/30 rounded-xl p-10 flex flex-col items-center justify-center text-center gap-4 bg-surface-container-lowest/50 transition-all duration-300 cursor-pointer group">
             <input id="pdfInput" type="file" accept="application/pdf,.pdf" class="hidden" />
-            <div class="w-16 h-16 bg-surface-container-highest rounded-full flex items-center justify-center mb-2 shadow-inner">
+            <div
+              class="w-16 h-16 bg-surface-container-highest rounded-full flex items-center justify-center mb-2 shadow-inner">
               <span id="uploadIcon" class="material-symbols-outlined text-3xl text-primary">file_upload</span>
             </div>
-            <p id="uploadPromptText" class="text-on-surface font-medium text-lg font-headline">Drop a PDF or click to browse</p>
-            <p id="uploadHintText" class="text-on-surface-variant text-xs mt-1">Formats: PDF only • Max size enforced by backend</p>
-            <button id="browseBtn" class="mt-4 px-6 py-2 bg-surface-container-highest border border-outline-variant/20 rounded text-xs font-bold uppercase tracking-widest hover:bg-primary hover:text-on-primary transition-all">Select File</button>
+            <p id="uploadPromptText" class="text-on-surface font-medium text-lg font-headline">Drop a PDF or click to
+              browse</p>
+            <p id="uploadHintText" class="text-on-surface-variant text-xs mt-1">Formats: PDF only • Max size enforced by
+              backend</p>
+            <button id="browseBtn"
+              class="mt-4 px-6 py-2 bg-surface-container-highest border border-outline-variant/20 rounded text-xs font-bold uppercase tracking-widest hover:bg-primary hover:text-on-primary transition-all">Select
+              File</button>
           </div>
 
           <div class="p-4 bg-surface-container-lowest rounded-lg border border-outline-variant/10 flex flex-col gap-2">
@@ -384,19 +683,27 @@
             <p id="fileMetaValue" class="text-[10px] text-on-surface-variant leading-relaxed">No file loaded.</p>
           </div>
 
-          <div class="flex flex-col gap-2">
-            <label class="text-xs font-label uppercase tracking-[0.1em] text-on-surface-variant font-bold" for="apiEndpointInput">Sanitize Endpoint</label>
-            <input id="apiEndpointInput" type="text" class="w-full bg-surface-container-lowest border border-outline-variant/20 rounded px-3 py-2 text-xs font-mono text-primary focus:ring-primary/40 focus:border-primary/40" placeholder="http://localhost:8000/api/v1/sanitize" />
+          <div class="p-4 bg-surface-container-lowest rounded-lg border border-outline-variant/10 flex flex-col gap-3">
+            <p class="text-[10px] text-on-surface-variant uppercase font-mono tracking-widest">Guided Flow</p>
+            <div class="workflow-grid">
+              <div id="stepUpload" class="workflow-step active">1 Upload</div>
+              <div id="stepQueue" class="workflow-step">2 Process</div>
+              <div id="stepReview" class="workflow-step">3 Review</div>
+            </div>
+            <p id="nextActionHint" class="next-action-chip">Select a PDF and processing will start automatically.</p>
           </div>
 
           <div class="flex flex-col gap-3">
-            <button id="queueBtn" class="primary-sheen w-full bg-primary text-on-primary py-4 rounded-xl font-black flex items-center justify-center gap-3 shadow-[0_0_20px_rgba(245,158,11,0.2)] hover:bg-amber-400 active:scale-[0.98] transition-all uppercase tracking-widest text-sm disabled:opacity-60 disabled:cursor-not-allowed" disabled>
-              <span class="material-symbols-outlined">queue</span>
-              <span>Queue Sanitization</span>
-            </button>
-            <button id="refreshBtn" class="w-full bg-surface-container-high text-on-surface py-4 rounded-xl font-bold flex items-center justify-center gap-3 border border-outline-variant/20 hover:bg-surface-container-highest transition-all uppercase tracking-widest text-sm disabled:opacity-60 disabled:cursor-not-allowed" disabled>
+            <button id="refreshBtn"
+              class="w-full bg-surface-container-high text-on-surface py-4 rounded-xl font-bold flex items-center justify-center gap-3 border border-outline-variant/20 hover:bg-surface-container-highest transition-all uppercase tracking-widest text-sm disabled:opacity-60 disabled:cursor-not-allowed"
+              disabled>
               <span class="material-symbols-outlined">refresh</span>
               <span>Refresh Job Status</span>
+            </button>
+            <button id="resetBtn"
+              class="w-full bg-surface-container-lowest text-on-surface-variant py-3 rounded-xl font-bold flex items-center justify-center gap-2 border border-outline-variant/20 hover:border-primary/30 hover:text-primary transition-all uppercase tracking-widest text-xs">
+              <span class="material-symbols-outlined text-base">restart_alt</span>
+              <span>Reset Workspace</span>
             </button>
           </div>
 
@@ -406,49 +713,59 @@
             </div>
             <div>
               <p id="queueStatusTitle" class="text-xs font-bold text-on-surface uppercase tracking-wider">Queue Idle</p>
-              <p id="queueStatusDetail" class="text-xs text-primary font-medium font-mono">Awaiting job submission</p>
+              <p id="queueStatusDetail" class="text-xs text-primary font-medium font-mono">Awaiting document upload</p>
             </div>
           </div>
 
           <div class="pt-4 border-t border-outline-variant/10">
-            <div class="flex justify-between items-center text-[10px] font-mono text-on-surface-variant mb-2 uppercase tracking-widest">
+            <div
+              class="flex justify-between items-center text-[10px] font-mono text-on-surface-variant mb-2 uppercase tracking-widest">
               <span>pipeline mode</span>
               <span class="text-primary font-bold">forensic redaction</span>
             </div>
-            <p class="text-[10px] text-on-surface-variant leading-relaxed">Generated documents are redacted with annotation-based removal, ensuring underlying content is destroyed, not overlaid.</p>
+            <p class="text-[10px] text-on-surface-variant leading-relaxed">Generated documents are redacted with
+              annotation-based removal, ensuring underlying content is destroyed, not overlaid.</p>
           </div>
         </div>
       </section>
 
       <section class="order-3 col-span-12 reveal reveal-delay-2">
-        <div class="motion-panel bg-surface-container-low rounded-xl border border-outline-variant/10 shadow-2xl flex flex-col overflow-hidden h-full">
-          <div class="bg-surface-container-high px-6 py-4 flex items-center justify-between border-b border-outline-variant/10">
+        <div
+          class="motion-panel liquid-panel bg-surface-container-low rounded-xl border border-outline-variant/10 shadow-2xl flex flex-col overflow-hidden h-full">
+          <div
+            class="bg-surface-container-high px-6 py-4 flex items-center justify-between border-b border-outline-variant/10">
             <div class="flex items-center gap-4">
               <span class="material-symbols-outlined text-primary">dashboard</span>
-              <h3 class="text-xs font-label uppercase tracking-[0.1em] text-primary font-bold">Zone 3: Extraction Engine</h3>
+              <h3 class="text-xs font-label uppercase tracking-[0.1em] text-primary font-bold">Zone 3: Extraction Engine
+              </h3>
             </div>
-            <div class="flex items-center gap-2 px-3 py-1 bg-surface-container-lowest rounded text-[10px] font-mono text-on-surface-variant border border-outline-variant/10">
+            <div
+              class="flex items-center gap-2 px-3 py-1 bg-surface-container-lowest rounded text-[10px] font-mono text-on-surface-variant border border-outline-variant/10">
               <span class="text-primary">JOB:</span>
               <span id="jobIdBadge">-</span>
             </div>
           </div>
 
           <div class="p-6 grid grid-cols-1 xl:grid-cols-2 gap-6">
-            <div class="bg-surface-container-lowest border border-outline-variant/10 rounded-xl p-6 flex flex-col gap-6">
+            <div
+              class="bg-surface-container-lowest border border-outline-variant/10 rounded-xl p-6 flex flex-col gap-6">
               <div class="flex items-end justify-between">
                 <div>
                   <p class="text-[10px] text-on-surface-variant uppercase font-mono mb-1">Detected Entities</p>
-                  <p class="text-3xl font-headline font-bold text-primary"><span id="metricEntities">0</span><span class="text-on-surface text-sm ml-1">items</span></p>
+                  <p class="text-3xl font-headline font-bold text-primary"><span id="metricEntities">0</span><span
+                      class="text-on-surface text-sm ml-1">items</span></p>
                 </div>
                 <div class="w-24 h-1.5 bg-surface-container-highest rounded-full overflow-hidden">
-                  <div id="primaryProgressFill" class="progress-fill bg-primary h-full shadow-[0_0_8px_#F59E0B]" style="width:0%"></div>
+                  <div id="primaryProgressFill" class="progress-fill bg-primary h-full shadow-[0_0_8px_#F59E0B]"
+                    style="width:0%"></div>
                 </div>
               </div>
 
               <div class="flex items-end justify-between">
                 <div>
                   <p class="text-[10px] text-on-surface-variant uppercase font-mono mb-1">Warnings</p>
-                  <p class="text-3xl font-headline font-bold text-primary"><span id="metricWarnings">0</span><span class="text-on-surface text-sm ml-1">flags</span></p>
+                  <p class="text-3xl font-headline font-bold text-primary"><span id="metricWarnings">0</span><span
+                      class="text-on-surface text-sm ml-1">flags</span></p>
                 </div>
                 <div class="w-24 h-1.5 bg-surface-container-highest rounded-full overflow-hidden">
                   <div id="secondaryProgressFill" class="progress-fill bg-amber-800 h-full" style="width:0%"></div>
@@ -458,22 +775,26 @@
               <div class="flex items-end justify-between">
                 <div>
                   <p class="text-[10px] text-on-surface-variant uppercase font-mono mb-1">Pipeline Progress</p>
-                  <p class="text-3xl font-headline font-bold text-primary"><span id="metricProgress">0</span><span class="text-on-surface text-sm ml-1">%</span></p>
+                  <p class="text-3xl font-headline font-bold text-primary"><span id="metricProgress">0</span><span
+                      class="text-on-surface text-sm ml-1">%</span></p>
                 </div>
                 <div class="w-24 h-1.5 bg-surface-container-highest rounded-full overflow-hidden">
-                  <div id="statusProgressFill" class="progress-fill bg-primary h-full shadow-[0_0_8px_#F59E0B]" style="width:0%"></div>
+                  <div id="statusProgressFill" class="progress-fill bg-primary h-full shadow-[0_0_8px_#F59E0B]"
+                    style="width:0%"></div>
                 </div>
               </div>
             </div>
 
             <div class="flex flex-col gap-6">
-              <div class="bg-surface-container-low p-6 rounded-xl border border-outline-variant/10 flex items-center justify-between">
+              <div
+                class="bg-surface-container-low p-6 rounded-xl border border-outline-variant/10 flex items-center justify-between">
                 <div class="flex items-center gap-3">
                   <div class="relative flex items-center justify-center">
                     <div class="absolute w-4 h-4 bg-primary/40 rounded-full animate-ping"></div>
                     <div class="w-2 h-2 bg-primary rounded-full"></div>
                   </div>
-                  <span class="text-xs font-bold font-label uppercase tracking-widest text-on-surface">Live Queue Pulse</span>
+                  <span class="text-xs font-bold font-label uppercase tracking-widest text-on-surface">Live Queue
+                    Pulse</span>
                 </div>
                 <span id="liveValue" class="font-mono text-[10px] text-primary">waiting</span>
               </div>
@@ -483,7 +804,8 @@
                   <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">dns</span>
                 </div>
                 <div>
-                  <p id="pipelineBadgeTitle" class="text-xs font-bold text-on-surface uppercase tracking-wider">Pipeline State</p>
+                  <p id="pipelineBadgeTitle" class="text-xs font-bold text-on-surface uppercase tracking-wider">Pipeline
+                    State</p>
                   <p id="pipelineBadgeDetail" class="text-xs text-primary font-medium font-mono">idle</p>
                 </div>
               </div>
@@ -494,11 +816,13 @@
               </div>
 
               <div class="pt-4 border-t border-outline-variant/10">
-                <div class="flex justify-between items-center text-[10px] font-mono text-on-surface-variant mb-2 uppercase tracking-widest">
+                <div
+                  class="flex justify-between items-center text-[10px] font-mono text-on-surface-variant mb-2 uppercase tracking-widest">
                   <span>sync mode</span>
                   <span class="text-primary font-bold">auto polling</span>
                 </div>
-                <p class="text-[10px] text-on-surface-variant leading-relaxed">The dashboard continuously checks queued and processing jobs. Use manual sync whenever needed.</p>
+                <p class="text-[10px] text-on-surface-variant leading-relaxed">The dashboard continuously checks queued
+                  and processing jobs. Use manual sync whenever needed.</p>
               </div>
             </div>
           </div>
@@ -506,13 +830,17 @@
       </section>
 
       <section class="order-4 col-span-12 reveal reveal-delay-3">
-        <div class="motion-panel bg-surface-container-low rounded-xl border border-outline-variant/10 shadow-2xl flex flex-col overflow-hidden">
-          <div class="bg-surface-container-high px-6 py-4 flex items-center justify-between border-b border-outline-variant/10">
+        <div
+          class="motion-panel liquid-panel bg-surface-container-low rounded-xl border border-outline-variant/10 shadow-2xl flex flex-col overflow-hidden">
+          <div
+            class="bg-surface-container-high px-6 py-4 flex items-center justify-between border-b border-outline-variant/10">
             <div class="flex items-center gap-4">
               <span class="material-symbols-outlined text-primary">list_alt</span>
-              <h3 class="text-xs font-label uppercase tracking-[0.1em] text-primary font-bold">Entity Inspection Matrix</h3>
+              <h3 class="text-xs font-label uppercase tracking-[0.1em] text-primary font-bold">Entity Inspection Matrix
+              </h3>
             </div>
-            <div class="flex items-center gap-2 px-3 py-1 bg-surface-container-lowest rounded text-[10px] font-mono text-on-surface-variant border border-outline-variant/10">
+            <div
+              class="flex items-center gap-2 px-3 py-1 bg-surface-container-lowest rounded text-[10px] font-mono text-on-surface-variant border border-outline-variant/10">
               <span class="text-primary">TRACK:</span>
               <span id="jobIdTableBadge">-</span>
             </div>
@@ -523,10 +851,18 @@
               <table class="w-full text-left text-xs font-label">
                 <thead class="bg-surface-container-highest/50 sticky top-0 glass-panel">
                   <tr>
-                    <th class="px-6 py-4 font-bold text-on-surface uppercase tracking-widest border-b border-outline-variant/10">Entity Text</th>
-                    <th class="px-6 py-4 font-bold text-on-surface uppercase tracking-widest border-b border-outline-variant/10">Type</th>
-                    <th class="px-6 py-4 font-bold text-on-surface uppercase tracking-widest border-b border-outline-variant/10">Pages</th>
-                    <th class="px-6 py-4 font-bold text-on-surface uppercase tracking-widest border-b border-outline-variant/10">Confidence</th>
+                    <th
+                      class="px-6 py-4 font-bold text-on-surface uppercase tracking-widest border-b border-outline-variant/10">
+                      Entity Text</th>
+                    <th
+                      class="px-6 py-4 font-bold text-on-surface uppercase tracking-widest border-b border-outline-variant/10">
+                      Type</th>
+                    <th
+                      class="px-6 py-4 font-bold text-on-surface uppercase tracking-widest border-b border-outline-variant/10">
+                      Pages</th>
+                    <th
+                      class="px-6 py-4 font-bold text-on-surface uppercase tracking-widest border-b border-outline-variant/10">
+                      Confidence</th>
                   </tr>
                 </thead>
                 <tbody id="entitiesTableBody" class="divide-y divide-outline-variant/5">
@@ -539,14 +875,17 @@
 
             <div class="xl:col-span-1 overflow-y-auto p-6 flex flex-col gap-6">
               <div class="bg-surface-container-lowest border border-outline-variant/10 rounded-xl p-4">
-                <h4 class="text-xs font-label uppercase tracking-[0.1em] text-on-surface-variant font-bold mb-4">Warnings</h4>
+                <h4 class="text-xs font-label uppercase tracking-[0.1em] text-on-surface-variant font-bold mb-4">
+                  Warnings</h4>
                 <ul id="warningsList" class="space-y-3">
                   <li class="text-[10px] text-on-surface-variant leading-relaxed">No warnings yet.</li>
                 </ul>
               </div>
 
-              <div id="selectedEntityCard" class="bg-surface-container-lowest border border-outline-variant/10 rounded-xl p-4 hidden">
-                <h4 class="text-xs font-label uppercase tracking-[0.1em] text-on-surface-variant font-bold mb-4">Selected Entity</h4>
+              <div id="selectedEntityCard"
+                class="bg-surface-container-lowest border border-outline-variant/10 rounded-xl p-4 hidden">
+                <h4 class="text-xs font-label uppercase tracking-[0.1em] text-on-surface-variant font-bold mb-4">
+                  Selected Entity</h4>
                 <div class="flex flex-col gap-3">
                   <p class="text-[10px] text-on-surface-variant uppercase font-mono">text</p>
                   <p id="selectedEntityText" class="text-xs text-on-surface leading-relaxed break-words">-</p>
@@ -573,11 +912,14 @@
               </div>
 
               <div class="pt-4 border-t border-outline-variant/10">
-                <div class="flex justify-between items-center text-[10px] font-mono text-on-surface-variant mb-2 uppercase tracking-widest">
+                <div
+                  class="flex justify-between items-center text-[10px] font-mono text-on-surface-variant mb-2 uppercase tracking-widest">
                   <span>inspection mode</span>
                   <span id="statusValue" class="text-primary font-bold">idle</span>
                 </div>
-                <p id="statusBadgePill" class="inline-flex items-center px-2 py-0.5 bg-primary/10 text-primary border border-primary/30 rounded text-[9px] uppercase font-bold tracking-tighter">No active job</p>
+                <p id="statusBadgePill"
+                  class="inline-flex items-center px-2 py-0.5 bg-primary/10 text-primary border border-primary/30 rounded text-[9px] uppercase font-bold tracking-tighter">
+                  No active job</p>
               </div>
             </div>
           </div>
@@ -585,37 +927,47 @@
       </section>
 
       <section class="order-2 col-span-12 lg:col-span-8 reveal reveal-delay-1">
-        <div class="motion-panel bg-surface-container-low rounded-xl border border-outline-variant/10 shadow-2xl flex flex-col overflow-hidden">
-          <div class="bg-surface-container-high px-6 py-4 flex items-center justify-between border-b border-outline-variant/10">
+        <div
+          class="motion-panel liquid-panel bg-surface-container-low rounded-xl border border-outline-variant/10 shadow-2xl flex flex-col overflow-hidden">
+          <div
+            class="bg-surface-container-high px-6 py-4 flex items-center justify-between border-b border-outline-variant/10">
             <div class="flex items-center gap-4">
               <span class="material-symbols-outlined text-primary">picture_as_pdf</span>
               <h3 class="text-xs font-label uppercase tracking-[0.1em] text-primary font-bold">Zone 2: Output</h3>
             </div>
-            <div class="flex items-center gap-2 px-3 py-1 bg-surface-container-lowest rounded text-[10px] font-mono text-on-surface-variant border border-outline-variant/10">
+            <div
+              class="flex items-center gap-2 px-3 py-1 bg-surface-container-lowest rounded text-[10px] font-mono text-on-surface-variant border border-outline-variant/10">
               <span class="text-primary">OUT:</span>
               <span id="jobIdOutputBadge">-</span>
             </div>
           </div>
 
           <div class="p-6 flex flex-col gap-6">
-            <div class="bg-surface-container-lowest border border-outline-variant/10 rounded-xl min-h-[560px] flex flex-col">
+            <div
+              class="bg-surface-container-lowest border border-outline-variant/10 rounded-xl min-h-[560px] flex flex-col">
               <div id="previewEmptyState" class="flex-1 flex flex-col items-center justify-center text-center p-8">
                 <div class="w-16 h-16 bg-surface-container-highest rounded-full flex items-center justify-center mb-3">
                   <span class="material-symbols-outlined text-3xl text-primary">visibility</span>
                 </div>
                 <p class="font-headline text-lg text-on-surface">Sanitized PDF preview will appear here</p>
-                <p class="text-xs text-on-surface-variant mt-2">Queue a PDF and wait for completion to unlock preview and download.</p>
+                <p class="text-xs text-on-surface-variant mt-2">Upload a PDF and wait for completion to unlock preview
+                  and download.</p>
               </div>
-              <iframe id="pdfPreview" title="Sanitized PDF Preview" class="preview-frame hidden w-full h-[560px]"></iframe>
+              <iframe id="pdfPreview" title="Sanitized PDF Preview"
+                class="preview-frame hidden w-full h-[560px]"></iframe>
             </div>
 
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              <button id="downloadBtn" class="primary-sheen lg:col-span-2 w-full bg-primary text-on-primary py-4 rounded-xl font-black flex items-center justify-center gap-3 shadow-[0_0_20px_rgba(245,158,11,0.2)] hover:bg-amber-400 active:scale-[0.98] transition-all uppercase tracking-widest text-sm disabled:opacity-60 disabled:cursor-not-allowed" disabled>
+              <button id="downloadBtn"
+                class="primary-sheen lg:col-span-2 w-full bg-primary text-on-primary py-4 rounded-xl font-black flex items-center justify-center gap-3 shadow-[0_0_20px_rgba(245,158,11,0.2)] hover:bg-amber-400 active:scale-[0.98] transition-all uppercase tracking-widest text-sm disabled:opacity-60 disabled:cursor-not-allowed"
+                disabled>
                 <span class="material-symbols-outlined">download</span>
                 <span>Download Sanitized PDF</span>
               </button>
 
-              <button id="manualRefreshBtn" class="lg:col-span-1 w-full bg-surface-container-high text-on-surface py-4 rounded-xl font-bold flex items-center justify-center gap-3 border border-outline-variant/20 hover:bg-surface-container-highest transition-all uppercase tracking-widest text-sm disabled:opacity-60 disabled:cursor-not-allowed" disabled>
+              <button id="manualRefreshBtn"
+                class="lg:col-span-1 w-full bg-surface-container-high text-on-surface py-4 rounded-xl font-bold flex items-center justify-center gap-3 border border-outline-variant/20 hover:bg-surface-container-highest transition-all uppercase tracking-widest text-sm disabled:opacity-60 disabled:cursor-not-allowed"
+                disabled>
                 <span class="material-symbols-outlined">refresh</span>
                 <span>Manual Status Sync</span>
               </button>
@@ -638,11 +990,13 @@
               </div>
 
               <div class="bg-surface-container-lowest border border-outline-variant/10 rounded-xl p-4">
-                <div class="flex justify-between items-center text-[10px] font-mono text-on-surface-variant mb-2 uppercase tracking-widest">
+                <div
+                  class="flex justify-between items-center text-[10px] font-mono text-on-surface-variant mb-2 uppercase tracking-widest">
                   <span>download gate</span>
                   <span class="text-primary font-bold">completed only</span>
                 </div>
-                <p class="text-[10px] text-on-surface-variant leading-relaxed">Output endpoint is enabled only when the backend marks the job as completed.</p>
+                <p class="text-[10px] text-on-surface-variant leading-relaxed">Output endpoint is enabled only when the
+                  backend marks the job as completed.</p>
               </div>
             </div>
           </div>
@@ -651,4 +1005,5 @@
     </div>
   </main>
 </body>
+
 </html>

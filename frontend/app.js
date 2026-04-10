@@ -28,7 +28,7 @@ const HIGH_RISK_ENTITY_TYPES = new Set([
 ]);
 
 const state = {
-  apiUrl: localStorage.getItem("sanitizeApiUrl") || FALLBACK_API_URL,
+  apiUrl: FALLBACK_API_URL,
   selectedFile: null,
   jobInfo: null,
   jobStatus: null,
@@ -39,6 +39,9 @@ const state = {
   redactedFileName: "",
   lastError: "",
   lastUpdatedIso: "",
+  notifications: [],
+  notificationCounter: 0,
+  activeTopPanel: null,
 };
 
 const ui = {
@@ -48,14 +51,29 @@ const ui = {
   uploadHintText: document.getElementById("uploadHintText"),
   pdfInput: document.getElementById("pdfInput"),
   browseBtn: document.getElementById("browseBtn"),
-  apiEndpointInput: document.getElementById("apiEndpointInput"),
-  queueBtn: document.getElementById("queueBtn"),
-  topQueueBtn: document.getElementById("topQueueBtn"),
+  securityBtn: document.getElementById("securityBtn"),
+  notificationsBtn: document.getElementById("notificationsBtn"),
+  notificationsBadge: document.getElementById("notificationsBadge"),
+  securityPanel: document.getElementById("securityPanel"),
+  notificationsPanel: document.getElementById("notificationsPanel"),
+  notificationsMarkRead: document.getElementById("notificationsMarkRead"),
+  notificationsList: document.getElementById("notificationsList"),
+  securityStatusValue: document.getElementById("securityStatusValue"),
+  securityJobValue: document.getElementById("securityJobValue"),
+  securityEntityValue: document.getElementById("securityEntityValue"),
+  securityWarningValue: document.getElementById("securityWarningValue"),
+  securityUpdatedValue: document.getElementById("securityUpdatedValue"),
   topPdfProgressFill: document.getElementById("topPdfProgressFill"),
   topPdfProgressLabel: document.getElementById("topPdfProgressLabel"),
   refreshBtn: document.getElementById("refreshBtn"),
   manualRefreshBtn: document.getElementById("manualRefreshBtn"),
   downloadBtn: document.getElementById("downloadBtn"),
+  resetBtn: document.getElementById("resetBtn"),
+
+  stepUpload: document.getElementById("stepUpload"),
+  stepQueue: document.getElementById("stepQueue"),
+  stepReview: document.getElementById("stepReview"),
+  nextActionHint: document.getElementById("nextActionHint"),
 
   fileNameValue: document.getElementById("fileNameValue"),
   fileMetaValue: document.getElementById("fileMetaValue"),
@@ -100,7 +118,21 @@ const ui = {
 };
 
 function init() {
-  ui.apiEndpointInput.value = state.apiUrl;
+  ui.securityBtn?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleTopPanel("security");
+  });
+  ui.notificationsBtn?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleTopPanel("notifications");
+  });
+  ui.notificationsMarkRead?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    markAllNotificationsRead();
+  });
+  ui.securityPanel?.addEventListener("click", (event) => event.stopPropagation());
+  ui.notificationsPanel?.addEventListener("click", (event) => event.stopPropagation());
+  document.addEventListener("click", () => closeTopPanels());
 
   ui.uploadZone.addEventListener("click", () => ui.pdfInput.click());
   ui.browseBtn.addEventListener("click", (event) => {
@@ -108,9 +140,9 @@ function init() {
     ui.pdfInput.click();
   });
 
-  ui.pdfInput.addEventListener("change", (event) => {
+  ui.pdfInput.addEventListener("change", async (event) => {
     const [file] = event.target.files;
-    setSelectedFile(file || null);
+    await setSelectedFile(file || null);
   });
 
   ui.uploadZone.addEventListener("dragover", (event) => {
@@ -122,25 +154,16 @@ function init() {
     ui.uploadZone.classList.remove("border-primary/40", "bg-surface-container-high");
   });
 
-  ui.uploadZone.addEventListener("drop", (event) => {
+  ui.uploadZone.addEventListener("drop", async (event) => {
     event.preventDefault();
     ui.uploadZone.classList.remove("border-primary/40", "bg-surface-container-high");
     const [file] = event.dataTransfer.files;
-    setSelectedFile(file || null);
+    await setSelectedFile(file || null);
   });
-
-  ui.apiEndpointInput.addEventListener("change", () => {
-    const raw = ui.apiEndpointInput.value.trim();
-    state.apiUrl = raw || FALLBACK_API_URL;
-    localStorage.setItem("sanitizeApiUrl", state.apiUrl);
-    render();
-  });
-
-  ui.queueBtn.addEventListener("click", () => enqueueJob());
-  ui.topQueueBtn.addEventListener("click", () => enqueueJob());
 
   ui.refreshBtn.addEventListener("click", () => refreshStatus(false));
   ui.manualRefreshBtn.addEventListener("click", () => refreshStatus(false));
+  ui.resetBtn.addEventListener("click", resetWorkspace);
 
   ui.downloadBtn.addEventListener("click", downloadPdf);
 
@@ -151,10 +174,12 @@ function init() {
     }
   });
 
+  pushNotification("info", "Console ready", "Upload a PDF to start sanitization.");
+
   render();
 }
 
-function setSelectedFile(file) {
+async function setSelectedFile(file) {
   if (!file) {
     state.selectedFile = null;
     render();
@@ -170,23 +195,31 @@ function setSelectedFile(file) {
   }
 
   state.selectedFile = file;
+  stopPolling();
+  state.jobInfo = null;
+  state.jobStatus = null;
+  state.selectedEntityIndex = null;
+  state.lastUpdatedIso = new Date().toISOString();
+  clearRedactedBlob();
   clearAlert();
+  pushNotification("info", "Document selected", `${file.name} • ${formatBytes(file.size)}`);
   render();
+
+  await enqueueJob();
 }
 
 async function enqueueJob() {
   if (!state.selectedFile) {
-    setAlert("Missing file", "Select a PDF before queueing sanitization.");
+    setAlert("Missing file", "Select a PDF to start sanitization.");
     return;
   }
 
   clearAlert();
-  ui.queueBtn.disabled = true;
-  ui.topQueueBtn.disabled = true;
 
   try {
     const payload = new FormData();
     payload.append("file", state.selectedFile, state.selectedFile.name);
+    pushNotification("info", "Sanitization started", "Uploading document and creating job.");
 
     const response = await fetch(state.apiUrl, {
       method: "POST",
@@ -205,6 +238,7 @@ async function enqueueJob() {
 
     clearRedactedBlob();
     clearAlert();
+    pushNotification("success", "Job queued", `Tracking ID ${shortJobId(state.jobInfo.job_id)}.`);
 
     await refreshStatus(true);
     const currentStatus = getCurrentStatus();
@@ -214,6 +248,7 @@ async function enqueueJob() {
       stopPolling();
     }
   } catch (error) {
+    pushNotification("error", "Queue request failed", readErrorMessage(error));
     setAlert("Queue request failed", readErrorMessage(error));
   } finally {
     render();
@@ -223,13 +258,14 @@ async function enqueueJob() {
 async function refreshStatus(isAutoRefresh) {
   if (!state.jobInfo || !state.jobInfo.status_url) {
     if (!isAutoRefresh) {
-      setAlert("No active job", "Queue a document first to poll status.");
+      setAlert("No active job", "Upload a document first to poll status.");
     }
     render();
     return;
   }
 
   try {
+    const previousStatus = getCurrentStatus();
     const response = await fetch(state.jobInfo.status_url, { method: "GET" });
     const data = await readJsonOrThrow(response);
 
@@ -242,9 +278,17 @@ async function refreshStatus(isAutoRefresh) {
     };
     state.lastUpdatedIso = new Date().toISOString();
 
+    if (state.jobStatus.status !== previousStatus) {
+      notifyStatusTransition(state.jobStatus.status);
+    }
+
     if (state.jobStatus.status === "completed") {
       stopPolling();
       await fetchRedactedPdf();
+      const warningCount = Array.isArray(state.jobStatus.warnings) ? state.jobStatus.warnings.length : 0;
+      if (warningCount > 0) {
+        pushNotification("warning", "Completed with warnings", `${warningCount} warning(s) reported by backend.`);
+      }
     } else if (state.jobStatus.status === "failed") {
       stopPolling();
       clearRedactedBlob();
@@ -304,6 +348,27 @@ function clearRedactedBlob() {
   state.redactedBlob = null;
   state.redactedUrl = "";
   state.redactedFileName = "";
+}
+
+function resetWorkspace() {
+  stopPolling();
+  clearRedactedBlob();
+  clearAlert();
+  closeTopPanels(false);
+
+  state.selectedFile = null;
+  state.jobInfo = null;
+  state.jobStatus = null;
+  state.selectedEntityIndex = null;
+  state.lastUpdatedIso = "";
+
+  if (ui.pdfInput) {
+    ui.pdfInput.value = "";
+  }
+
+  pushNotification("info", "Workspace reset", "Cleared active document and job state.");
+
+  render();
 }
 
 function inferOutputFilename() {
@@ -428,6 +493,7 @@ function render() {
   const warnings = getWarnings();
   const hasActiveJob = Boolean(state.jobInfo && state.jobInfo.job_id);
   const hasSelectedFile = Boolean(state.selectedFile);
+  const hasPreview = Boolean(state.redactedUrl && state.redactedBlob);
 
   ui.uploadPromptText.textContent = hasSelectedFile
     ? "Document Uploaded"
@@ -453,8 +519,6 @@ function render() {
     ? `${formatBytes(state.selectedFile.size)} • PDF document`
     : "No file loaded.";
 
-  ui.queueBtn.disabled = !state.selectedFile;
-  ui.topQueueBtn.disabled = !state.selectedFile;
   ui.refreshBtn.disabled = !hasActiveJob;
   ui.manualRefreshBtn.disabled = !hasActiveJob;
 
@@ -466,7 +530,7 @@ function render() {
   ui.metricEntities.textContent = String(entities.length);
   ui.metricWarnings.textContent = String(warnings.length);
 
-  const progress = STATUS_PROGRESS[status] ?? 0;
+  const progress = getProgressPercent(status);
   ui.metricProgress.textContent = String(progress);
   ui.statusProgressFill.style.width = `${progress}%`;
 
@@ -487,16 +551,160 @@ function render() {
 
   ui.statusValue.textContent = status;
   ui.queueStatusTitle.textContent = statusLabel(status);
-  ui.queueStatusDetail.textContent = statusDetail(status, jobId);
+  ui.queueStatusDetail.textContent =
+    (state.jobStatus && String(state.jobStatus.status_message || "").trim()) || statusDetail(status, jobId);
   ui.pipelineBadgeTitle.textContent = "Pipeline State";
   ui.pipelineBadgeDetail.textContent = `${status.toUpperCase()} • ${jobId}`;
   ui.liveValue.textContent = liveStateLabel(status, hasActiveJob);
+
+  renderWorkflow(status, hasSelectedFile, hasActiveJob, hasPreview);
 
   renderStatusPill(status);
   renderWarnings(warnings);
   renderEntities(entities);
   renderSelectedEntity(entities);
   renderOutput(status);
+  renderTopPanels(status, jobId, entities, warnings);
+}
+
+function notifyStatusTransition(status) {
+  if (status === "queued") {
+    pushNotification("info", "Job queued", "Waiting for worker assignment.");
+    return;
+  }
+
+  if (status === "processing") {
+    pushNotification("info", "Processing", "OCR and entity detection are in progress.");
+    return;
+  }
+
+  if (status === "completed") {
+    pushNotification("success", "Sanitization complete", "Redacted output is ready for review and download.");
+    return;
+  }
+
+  if (status === "failed") {
+    pushNotification("error", "Pipeline failed", "Review the alert panel for error details.");
+  }
+}
+
+function pushNotification(level, title, detail) {
+  const entry = {
+    id: ++state.notificationCounter,
+    level,
+    title: String(title || "Update"),
+    detail: String(detail || ""),
+    timeIso: new Date().toISOString(),
+    read: state.activeTopPanel === "notifications",
+  };
+
+  state.notifications = [entry, ...state.notifications].slice(0, 30);
+}
+
+function markAllNotificationsRead() {
+  state.notifications = state.notifications.map((item) => ({ ...item, read: true }));
+  renderTopPanels(getCurrentStatus(), state.jobInfo?.job_id || "-", getEntities(), getWarnings());
+}
+
+function toggleTopPanel(panelName) {
+  state.activeTopPanel = state.activeTopPanel === panelName ? null : panelName;
+  if (state.activeTopPanel === "notifications") {
+    state.notifications = state.notifications.map((item) => ({ ...item, read: true }));
+  }
+  render();
+}
+
+function closeTopPanels(shouldRender = true) {
+  if (!state.activeTopPanel) {
+    return;
+  }
+  state.activeTopPanel = null;
+  if (shouldRender) {
+    render();
+  }
+}
+
+function renderTopPanels(status, jobId, entities, warnings) {
+  if (ui.securityPanel) {
+    ui.securityPanel.classList.toggle("hidden", state.activeTopPanel !== "security");
+  }
+  if (ui.notificationsPanel) {
+    ui.notificationsPanel.classList.toggle("hidden", state.activeTopPanel !== "notifications");
+  }
+  if (ui.securityBtn) {
+    ui.securityBtn.classList.toggle("active", state.activeTopPanel === "security");
+  }
+  if (ui.notificationsBtn) {
+    ui.notificationsBtn.classList.toggle("active", state.activeTopPanel === "notifications");
+  }
+
+  const unreadCount = state.notifications.filter((item) => !item.read).length;
+  if (ui.notificationsBadge) {
+    ui.notificationsBadge.textContent = unreadCount > 9 ? "9+" : String(unreadCount);
+    ui.notificationsBadge.classList.toggle("hidden", unreadCount === 0);
+  }
+
+  if (ui.notificationsList) {
+    ui.notificationsList.replaceChildren();
+    if (!state.notifications.length) {
+      const empty = document.createElement("li");
+      empty.className = "text-[10px] text-on-surface-variant";
+      empty.textContent = "No notifications yet.";
+      ui.notificationsList.appendChild(empty);
+    } else {
+      state.notifications.forEach((item) => {
+        const row = document.createElement("li");
+        row.className = `notification-item ${escapeHtml(item.level || "info")}`;
+        row.innerHTML = [
+          `<p class="text-[10px] font-semibold tracking-wide uppercase ${item.level === "error" ? "text-error" : "text-primary"}">${escapeHtml(item.title)}</p>`,
+          `<p class="mt-1 text-[10px] text-on-surface-variant leading-relaxed">${escapeHtml(item.detail)}</p>`,
+          `<p class="mt-1 text-[9px] font-mono text-on-surface-variant/80">${escapeHtml(formatTimeLabel(item.timeIso))}</p>`,
+        ].join("");
+        ui.notificationsList.appendChild(row);
+      });
+    }
+  }
+
+  if (ui.securityStatusValue) {
+    ui.securityStatusValue.textContent = String(status || "idle");
+  }
+  if (ui.securityJobValue) {
+    ui.securityJobValue.textContent = shortJobId(jobId);
+  }
+  if (ui.securityEntityValue) {
+    ui.securityEntityValue.textContent = String(Array.isArray(entities) ? entities.length : 0);
+  }
+  if (ui.securityWarningValue) {
+    ui.securityWarningValue.textContent = String(Array.isArray(warnings) ? warnings.length : 0);
+  }
+  if (ui.securityUpdatedValue) {
+    ui.securityUpdatedValue.textContent = formatTimeLabel(state.lastUpdatedIso);
+  }
+}
+
+function shortJobId(jobId) {
+  const id = String(jobId || "").trim();
+  if (!id || id === "-") {
+    return "-";
+  }
+  return id.length <= 10 ? id : `${id.slice(0, 8)}...`;
+}
+
+function formatTimeLabel(isoString) {
+  if (!isoString) {
+    return "-";
+  }
+
+  const parsed = new Date(isoString);
+  if (Number.isNaN(parsed.getTime())) {
+    return "-";
+  }
+
+  return parsed.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
 function renderStatusPill(status) {
@@ -672,6 +880,66 @@ function liveStateLabel(status, hasActiveJob) {
     return "attention";
   }
   return "active";
+}
+
+function getProgressPercent(status) {
+  const backendProgress = Number(state.jobStatus && state.jobStatus.progress);
+  if (Number.isFinite(backendProgress)) {
+    return Math.round(Math.max(0, Math.min(1, backendProgress)) * 100);
+  }
+
+  return STATUS_PROGRESS[status] ?? 0;
+}
+
+function setWorkflowStepState(node, mode) {
+  if (!node) {
+    return;
+  }
+
+  node.classList.remove("active", "done");
+  if (mode === "active") {
+    node.classList.add("active");
+  } else if (mode === "done") {
+    node.classList.add("done");
+  }
+}
+
+function renderWorkflow(status, hasSelectedFile, hasActiveJob, hasPreview) {
+  if (!ui.stepUpload || !ui.stepQueue || !ui.stepReview || !ui.nextActionHint) {
+    return;
+  }
+
+  setWorkflowStepState(ui.stepUpload, hasSelectedFile ? "done" : "active");
+  setWorkflowStepState(ui.stepQueue, "");
+  setWorkflowStepState(ui.stepReview, "");
+
+  if (hasSelectedFile && !hasActiveJob) {
+    setWorkflowStepState(ui.stepQueue, "active");
+    ui.nextActionHint.textContent = "Uploading document and starting sanitization...";
+    return;
+  }
+
+  if (status === "queued" || status === "processing") {
+    setWorkflowStepState(ui.stepQueue, "active");
+    ui.nextActionHint.textContent = "Processing in progress. You can keep this page open while status auto-refreshes.";
+    return;
+  }
+
+  if (status === "completed" && hasPreview) {
+    setWorkflowStepState(ui.stepQueue, "done");
+    setWorkflowStepState(ui.stepReview, "done");
+    ui.nextActionHint.textContent = "Review detected entities, preview output, then download sanitized PDF.";
+    return;
+  }
+
+  if (status === "failed") {
+    setWorkflowStepState(ui.stepQueue, "done");
+    setWorkflowStepState(ui.stepReview, "active");
+    ui.nextActionHint.textContent = "Check warnings/error details, then upload the file again.";
+    return;
+  }
+
+  ui.nextActionHint.textContent = "Select a PDF and processing will start automatically.";
 }
 
 function downloadPdf() {
