@@ -819,7 +819,7 @@ function renderSelectedEntity(entities) {
   ui.selectedEntityCard.classList.remove("hidden");
   ui.selectedEntityText.textContent = entity.entity_text || "-";
   ui.selectedEntityType.textContent = entity.entity_type || "-";
-  ui.selectedEntitySource.textContent = entity.source || "-";
+  ui.selectedEntitySource.textContent = formatEntitySource(entity);
   ui.selectedEntityConfidence.textContent = formatPercent(entity.confidence_score);
   ui.selectedEntityPages.textContent = extractPages(entity).join(", ") || "-";
 }
@@ -973,6 +973,35 @@ function extractPages(entity) {
 function isHighRisk(entity) {
   const type = String(entity.entity_type || "").toUpperCase();
   return HIGH_RISK_ENTITY_TYPES.has(type);
+}
+
+function formatEntitySource(entity) {
+  const source = String((entity && entity.source) || "").trim();
+  if (!source) {
+    return "-";
+  }
+
+  if (source !== "Hybrid") {
+    return source;
+  }
+
+  const rawSupporting = Array.isArray(entity.supporting_sources)
+    ? entity.supporting_sources
+    : [];
+  const normalized = [];
+  rawSupporting.forEach((item) => {
+    const label = String(item || "").trim();
+    if (!label || normalized.includes(label)) {
+      return;
+    }
+    normalized.push(label);
+  });
+
+  if (!normalized.length) {
+    return "Hybrid";
+  }
+
+  return `Hybrid (${normalized.join(" + ")})`;
 }
 
 function statusLabel(status) {

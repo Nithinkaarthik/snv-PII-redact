@@ -176,8 +176,9 @@ def _extract_page_words_tesseract(page: fitz.Page, page_number: int) -> List[OCR
     lines = ocr_data.get("line_num", [])
     _debug("OCR_RAW_OUTPUT page=%s candidates=%s", page_number + 1, len(texts))
 
-    zoom_x = matrix.a
-    zoom_y = matrix.d
+    full_matrix = page.rotation_matrix * matrix
+    inverse_matrix = ~full_matrix
+
     skipped_empty = 0
     skipped_conf = 0
 
@@ -192,12 +193,15 @@ def _extract_page_words_tesseract(page: fitz.Page, page_number: int) -> List[OCR
             skipped_conf += 1
             continue
 
-        left = _safe_float(lefts[index] if index < len(lefts) else 0.0) / zoom_x
-        top = _safe_float(tops[index] if index < len(tops) else 0.0) / zoom_y
-        width = _safe_float(widths[index] if index < len(widths) else 0.0) / zoom_x
-        height = _safe_float(heights[index] if index < len(heights) else 0.0) / zoom_y
-        right = left + max(width, 0.0)
-        bottom = top + max(height, 0.0)
+        raw_left = _safe_float(lefts[index] if index < len(lefts) else 0.0)
+        raw_top = _safe_float(tops[index] if index < len(tops) else 0.0)
+        raw_width = _safe_float(widths[index] if index < len(widths) else 0.0)
+        raw_height = _safe_float(heights[index] if index < len(heights) else 0.0)
+        
+        rect = fitz.Rect(raw_left, raw_top, raw_left + raw_width, raw_top + raw_height)
+        rect *= inverse_matrix
+
+        left, top, right, bottom = rect.x0, rect.y0, rect.x1, rect.y1
 
         block_no = blocks[index] if index < len(blocks) else 0
         paragraph_no = paragraphs[index] if index < len(paragraphs) else 0

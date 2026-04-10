@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Full, Queue
 from threading import Lock, Thread
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Set, Tuple
 from urllib.parse import urljoin
 from uuid import uuid4
 
@@ -103,6 +103,8 @@ except ImportError:
     from text_mapping import build_character_bbox_map, deduplicate_boxes, get_bboxes_for_offsets
 
 JobStatus = Literal["queued", "processing", "completed", "failed"]
+EngineSource = Literal["Presidio", "LLM"]
+DetectionSource = Literal["Presidio", "LLM", "Hybrid"]
 
 _ANALYZER: Optional[AnalyzerEngine] = None
 WORKER_THREAD: Optional[Thread] = None
@@ -122,6 +124,26 @@ _CONTEXTUAL_IDENTIFIER_PATTERN = re.compile(
     r"(?:id|identifier|number|no\.?|#)\b",
     flags=re.IGNORECASE,
 )
+_ENGINE_SOURCE_ORDER: Tuple[EngineSource, ...] = ("Presidio", "LLM")
+_STRUCTURED_ENTITY_TYPES: Set[str] = {
+    "EMAIL_ADDRESS",
+    "URL",
+    "PHONE_NUMBER",
+    "FAX_NUMBER",
+    "US_BANK_NUMBER",
+    "US_DRIVER_LICENSE",
+    "CUSTOMER_IDENTIFIER",
+}
+_LLM_CONTEXT_ENTITY_TYPES: Set[str] = {
+    "LEGAL_PARTY_NAME",
+    "FINANCIAL_PENALTY_AMOUNT",
+    "JURISDICTION_STATE",
+}
+_AMBIGUOUS_TYPE_SOURCE_BONUS: Dict[Tuple[str, EngineSource], float] = {
+    ("PERSON", "Presidio"): 0.08,
+    ("STREET_ADDRESS", "Presidio"): 0.08,
+    ("ORGANIZATION", "LLM"): 0.08,
+}
 
 
 class BBoxModel(BaseModel):
@@ -136,7 +158,9 @@ class DetectedEntity(BaseModel):
     entity_text: str
     entity_type: str
     confidence_score: float = Field(..., ge=0.0, le=1.0)
-    source: Literal["Presidio", "LLM"]
+    source: DetectionSource
+    supporting_sources: List[EngineSource] = Field(default_factory=list)
+    decision_reason: Optional[str] = None
     boxes: List[BBoxModel] = Field(default_factory=list)
 
 
@@ -170,8 +194,10 @@ class Detection:
     entity_text: str
     entity_type: str
     confidence_score: float
-    source: Literal["Presidio", "LLM"]
+    source: DetectionSource
     boxes: List[BoundingBox]
+    supporting_sources: List[EngineSource] = field(default_factory=list)
+    decision_reason: Optional[str] = None
 
 
 @dataclass
@@ -727,6 +753,8 @@ def _tighten_detections_for_page(
                 confidence_score=detection.confidence_score,
                 source=detection.source,
                 boxes=tightened_boxes,
+                supporting_sources=detection.supporting_sources,
+                decision_reason=detection.decision_reason,
             )
         )
 
@@ -966,6 +994,8 @@ def run_presidio_triage(
                     confidence_score=confidence,
                     source="Presidio",
                     boxes=boxes,
+                    supporting_sources=["Presidio"],
+                    decision_reason="single_source_presidio",
                 )
             )
 
@@ -1080,6 +1110,8 @@ def run_llm_context_triage(
                     confidence_score=combined_conf,
                     source="LLM",
                     boxes=boxes,
+                    supporting_sources=["LLM"],
+                    decision_reason="single_source_llm",
                 )
             )
 
@@ -1225,8 +1257,157 @@ def apply_secure_redactions(pdf_bytes: bytes, detections: Sequence[Detection]) -
         document.close()
 
 
+def _source_rank(source: str) -> int:
+    if source in _ENGINE_SOURCE_ORDER:
+        return _ENGINE_SOURCE_ORDER.index(source)  # type: ignore[arg-type]
+    return len(_ENGINE_SOURCE_ORDER)
+
+
+def _extract_supporting_sources(detection: Detection) -> List[EngineSource]:
+    raw_sources: List[str] = []
+    if detection.supporting_sources:
+        raw_sources.extend(detection.supporting_sources)
+
+    if detection.source == "Hybrid":
+        raw_sources.extend(_ENGINE_SOURCE_ORDER)
+    else:
+        raw_sources.append(detection.source)
+
+    normalized: List[EngineSource] = []
+    seen: Set[str] = set()
+    for source in raw_sources:
+        if source not in _ENGINE_SOURCE_ORDER or source in seen:
+            continue
+        seen.add(source)
+        normalized.append(source)  # type: ignore[arg-type]
+
+    return sorted(normalized, key=_source_rank)
+
+
+def _supports_source(detection: Detection, source: EngineSource) -> bool:
+    return source in _extract_supporting_sources(detection)
+
+
+def _type_matrix_score(detection: Detection) -> float:
+    confidence = float(detection.confidence_score)
+    entity_type = str(detection.entity_type or "").strip().upper()
+    score = confidence
+
+    if entity_type in _STRUCTURED_ENTITY_TYPES:
+        score += 0.25
+
+    if entity_type in _LLM_CONTEXT_ENTITY_TYPES and _supports_source(detection, "LLM"):
+        score += 0.15
+
+    for source in _extract_supporting_sources(detection):
+        score += _AMBIGUOUS_TYPE_SOURCE_BONUS.get((entity_type, source), 0.0)
+
+    return score
+
+
+def _resolve_entity_type_with_matrix(candidates: Sequence[Detection]) -> Tuple[str, str]:
+    typed_candidates = [item for item in candidates if str(item.entity_type or "").strip()]
+    if not typed_candidates:
+        return "UNKNOWN", "type_matrix_missing_type"
+
+    unique_types = {item.entity_type for item in typed_candidates}
+    if len(unique_types) == 1:
+        return typed_candidates[0].entity_type, "type_consensus"
+
+    structured = [item for item in typed_candidates if item.entity_type in _STRUCTURED_ENTITY_TYPES]
+    if structured:
+        winner = max(
+            structured,
+            key=lambda item: (
+                _type_matrix_score(item),
+                float(item.confidence_score),
+                -_source_rank(_extract_supporting_sources(item)[0] if _extract_supporting_sources(item) else item.source),
+            ),
+        )
+        return winner.entity_type, "type_matrix_structured_priority"
+
+    llm_context = [
+        item
+        for item in typed_candidates
+        if item.entity_type in _LLM_CONTEXT_ENTITY_TYPES and _supports_source(item, "LLM")
+    ]
+    if llm_context:
+        winner = max(
+            llm_context,
+            key=lambda item: (
+                _type_matrix_score(item),
+                float(item.confidence_score),
+            ),
+        )
+        return winner.entity_type, "type_matrix_llm_context_priority"
+
+    winner = max(
+        typed_candidates,
+        key=lambda item: (
+            _type_matrix_score(item),
+            float(item.confidence_score),
+            -_source_rank(_extract_supporting_sources(item)[0] if _extract_supporting_sources(item) else item.source),
+        ),
+    )
+    return winner.entity_type, "type_matrix_conflict_resolved"
+
+
+def _resolve_box_candidates(candidates_by_box: Sequence[Tuple[Detection, BoundingBox]]) -> Optional[Detection]:
+    if not candidates_by_box:
+        return None
+
+    detections = [detection for detection, _box in candidates_by_box]
+    merged_boxes = deduplicate_boxes([box for _detection, box in candidates_by_box])
+    if not merged_boxes:
+        return None
+
+    supporting_sources_set: Set[EngineSource] = set()
+    for detection in detections:
+        supporting_sources_set.update(_extract_supporting_sources(detection))
+
+    supporting_sources = sorted(supporting_sources_set, key=_source_rank)
+    if supporting_sources:
+        resolved_source: DetectionSource = "Hybrid" if len(supporting_sources) > 1 else supporting_sources[0]
+    else:
+        resolved_source = "Presidio"
+
+    resolved_type, decision_reason = _resolve_entity_type_with_matrix(detections)
+    text_candidates = [
+        detection
+        for detection in detections
+        if detection.entity_type == resolved_type and str(detection.entity_text or "").strip()
+    ]
+    if not text_candidates:
+        text_candidates = [detection for detection in detections if str(detection.entity_text or "").strip()]
+    if not text_candidates:
+        text_candidates = detections
+
+    text_winner = max(
+        text_candidates,
+        key=lambda detection: (
+            float(detection.confidence_score),
+            len(str(detection.entity_text or "")),
+        ),
+    )
+
+    resolved_text = re.sub(r"\s+", " ", str(text_winner.entity_text or "")).strip()
+    if not resolved_text:
+        resolved_text = re.sub(r"\s+", " ", str(detections[0].entity_text or "")).strip()
+
+    confidence = max(float(item.confidence_score) for item in detections)
+    return Detection(
+        entity_text=resolved_text,
+        entity_type=resolved_type,
+        confidence_score=confidence,
+        source=resolved_source,
+        boxes=merged_boxes,
+        supporting_sources=supporting_sources,
+        decision_reason=decision_reason,
+    )
+
+
 def deduplicate_entities(detected_entities: Sequence[Detection]) -> List[Detection]:
-    winners_by_box: Dict[Tuple[int, float, float, float, float], Tuple[Detection, BoundingBox]] = {}
+    grouped_by_box: Dict[Tuple[int, float, float, float, float], List[Tuple[Detection, BoundingBox]]] = {}
 
     for detection in detected_entities:
         confidence = float(detection.confidence_score)
@@ -1241,31 +1422,26 @@ def deduplicate_entities(detected_entities: Sequence[Detection]) -> List[Detecti
                 round(box.x1, 2),
                 round(box.y1, 2),
             )
-            existing = winners_by_box.get(key)
-            if existing is None:
-                winners_by_box[key] = (detection, box)
-                continue
+            grouped_by_box.setdefault(key, []).append((detection, box))
 
-            existing_detection, _existing_box = existing
-            existing_confidence = float(existing_detection.confidence_score)
-            should_replace = confidence > existing_confidence
-            if confidence == existing_confidence and detection.source == "Presidio" and existing_detection.source != "Presidio":
-                should_replace = True
+    resolved_by_box: List[Detection] = []
+    for candidates_by_box in grouped_by_box.values():
+        resolved = _resolve_box_candidates(candidates_by_box)
+        if resolved is not None:
+            resolved_by_box.append(resolved)
 
-            if should_replace:
-                winners_by_box[key] = (detection, box)
-
-    deduplicated: Dict[Tuple[str, str, str, float], Detection] = {}
-    for detection, box in winners_by_box.values():
+    deduplicated: Dict[Tuple[str, str, DetectionSource, Tuple[EngineSource, ...]], Detection] = {}
+    for detection in resolved_by_box:
         normalized_text = re.sub(r"\s+", " ", detection.entity_text).strip()
         if not normalized_text:
             continue
 
+        supporting_sources = _extract_supporting_sources(detection)
         aggregate_key = (
             normalized_text.lower(),
             detection.entity_type,
             detection.source,
-            round(float(detection.confidence_score), 6),
+            tuple(supporting_sources),
         )
         aggregate = deduplicated.get(aggregate_key)
         if aggregate is None:
@@ -1275,13 +1451,22 @@ def deduplicate_entities(detected_entities: Sequence[Detection]) -> List[Detecti
                 confidence_score=float(detection.confidence_score),
                 source=detection.source,
                 boxes=[],
+                supporting_sources=supporting_sources,
+                decision_reason=detection.decision_reason,
             )
             deduplicated[aggregate_key] = aggregate
 
-        aggregate.boxes.append(box)
+        aggregate.confidence_score = max(float(aggregate.confidence_score), float(detection.confidence_score))
+        if detection.source == "Hybrid" and detection.decision_reason:
+            aggregate.decision_reason = detection.decision_reason
+        elif aggregate.decision_reason is None and detection.decision_reason:
+            aggregate.decision_reason = detection.decision_reason
+
+        aggregate.boxes.extend(detection.boxes)
 
     for aggregate in deduplicated.values():
         aggregate.boxes = deduplicate_boxes(aggregate.boxes)
+        aggregate.supporting_sources = _extract_supporting_sources(aggregate)
 
     return sorted(
         deduplicated.values(),
@@ -1297,12 +1482,15 @@ def serialize_detections(detections: Sequence[Detection]) -> List[DetectedEntity
     serialized: List[DetectedEntity] = []
     for detection in detections:
         score = min(max(float(detection.confidence_score), 0.0), 1.0)
+        supporting_sources = _extract_supporting_sources(detection)
         serialized.append(
             DetectedEntity(
                 entity_text=detection.entity_text,
                 entity_type=detection.entity_type,
                 confidence_score=score,
                 source=detection.source,
+                supporting_sources=supporting_sources,
+                decision_reason=detection.decision_reason,
                 boxes=[
                     BBoxModel(
                         page_number=box.page_number + 1,
