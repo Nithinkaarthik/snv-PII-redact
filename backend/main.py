@@ -1,31 +1,126 @@
 from __future__ import annotations
 
-import base64
 import io
 import json
 import logging
 import os
 import re
-from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional, Sequence, Tuple
+import tempfile
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from queue import Full, Queue
+from threading import Lock, Thread
+from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple
+from urllib.parse import urljoin
+from uuid import uuid4
 
 import fitz
 import pytesseract
-from fastapi import FastAPI, File, HTTPException, UploadFile
+import requests
+from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from litellm import completion
+from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel, Field
+from rapidfuzz import fuzz
 from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+
+def _load_local_env_files() -> None:
+    backend_dir = Path(__file__).resolve().parent
+    candidate_paths = [
+        backend_dir / ".env",
+        backend_dir.parent / ".env",
+    ]
+
+    for env_path in candidate_paths:
+        if not env_path.exists():
+            continue
+
+        try:
+            for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                if line.lower().startswith("export "):
+                    line = line[7:].strip()
+
+                if "=" not in line:
+                    continue
+
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+                if not key:
+                    continue
+
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                    value = value[1:-1]
+
+                os.environ.setdefault(key, value)
+        except OSError as exc:
+            logging.getLogger("sanitize_pipeline").warning(
+                "Failed to load environment file %s: %s",
+                str(env_path),
+                str(exc),
+            )
+
+
+def _get_openrouter_api_key() -> str:
+    key = (os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+    if key.lower().startswith("bearer "):
+        key = key[7:].strip()
+    return key.strip().strip('"').strip("'")
+
+
+def _normalize_openrouter_api_base(api_base: str) -> str:
+    cleaned = api_base.strip().strip('"').strip("'")
+    if not cleaned:
+        return DEFAULT_OPENROUTER_API_BASE
+
+    lowered = cleaned.lower().rstrip("/")
+    if lowered.endswith("/chat/completions"):
+        cleaned = cleaned[: -len("/chat/completions")]
+
+    root = cleaned.rstrip("/")
+    if root in {"https://openrouter.ai", "http://openrouter.ai"}:
+        cleaned = f"{root}/api/v1"
+
+    return cleaned
+
+
+_load_local_env_files()
 
 LOGGER = logging.getLogger("sanitize_pipeline")
 logging.basicConfig(level=logging.INFO)
 
 TARGET_PII_ENTITIES: Optional[List[str]] = None
 MAX_FILE_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_MB", "30")) * 1024 * 1024
+MAX_JOB_QUEUE_SIZE = int(os.getenv("MAX_JOB_QUEUE_SIZE", "32"))
+JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "1800"))
+NATIVE_TEXT_MIN_ALNUM = int(os.getenv("NATIVE_TEXT_MIN_ALNUM", "20"))
+
 LLM_TEXT_CHAR_LIMIT = int(os.getenv("LLM_TEXT_CHAR_LIMIT", "20000"))
-DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "openrouter/openai/gpt-4o-mini")
+DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-safeguard-20b")
 DEFAULT_OPENROUTER_API_BASE = os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
+LLM_REQUEST_TIMEOUT_SECONDS = int(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "60"))
+
+DEFAULT_SPACY_MODEL = os.getenv("PRESIDIO_SPACY_MODEL", "en_core_web_trf")
+MIN_ENTITY_CONFIDENCE = float(os.getenv("MIN_ENTITY_CONFIDENCE", "0.7"))
+FUZZY_MATCH_THRESHOLD = int(os.getenv("FUZZY_MATCH_THRESHOLD", "92"))
+
+IGNORE_JSON_KEYS: Set[str] = {"id", "filename", "metadata.item", "input.ke"}
+BUSINESS_KEYWORD_PATTERN = re.compile(
+    r"\b(?:inc|inc\.|llc|corp|corp\.|corporation|co|co\.|company|ltd|ltd\.|plc|bioventures|ventures)\b",
+    flags=re.IGNORECASE,
+)
+
+JOB_STORAGE_DIR = Path(
+    os.getenv("SANITIZE_JOB_STORAGE_DIR", str(Path(tempfile.gettempdir()) / "snv-pii-redact-jobs"))
+)
 
 US_STATE_NAMES = {
     "alabama",
@@ -135,7 +230,13 @@ US_STATE_ABBREVIATIONS = {
     "DC",
 }
 
+JobStatus = Literal["queued", "processing", "completed", "failed"]
+
 _ANALYZER: Optional[AnalyzerEngine] = None
+WORKER_THREAD: Optional[Thread] = None
+JOB_QUEUE: Queue[str] = Queue(maxsize=MAX_JOB_QUEUE_SIZE)
+JOB_STORE: Dict[str, "JobRecord"] = {}
+JOB_LOCK = Lock()
 
 
 class BBoxModel(BaseModel):
@@ -154,10 +255,20 @@ class DetectedEntity(BaseModel):
     boxes: List[BBoxModel] = Field(default_factory=list)
 
 
-class SanitizeResponse(BaseModel):
-    detected_entities: List[DetectedEntity]
-    redacted_pdf_base64: str
+class SanitizeJobCreateResponse(BaseModel):
+    job_id: str
+    status: JobStatus
+    status_url: str
+    download_url: str
+
+
+class SanitizeJobStatusResponse(BaseModel):
+    job_id: str
+    status: JobStatus
+    detected_entities: List[DetectedEntity] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
+    error: Optional[str] = None
+    download_url: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -177,10 +288,18 @@ class OCRWord:
 
 
 @dataclass(frozen=True)
-class IndexedWord:
-    word: OCRWord
+class WordSpan:
+    text: str
     start_char: int
     end_char: int
+    bbox: BoundingBox
+    line_key: str
+
+
+@dataclass(frozen=True)
+class LLMQuoteCandidate:
+    quote: str
+    confidence: float
 
 
 @dataclass
@@ -192,7 +311,21 @@ class Detection:
     boxes: List[BoundingBox]
 
 
-app = FastAPI(title="Document Sanitization MVP1", version="1.0.0")
+@dataclass
+class JobRecord:
+    job_id: str
+    filename: str
+    status: JobStatus
+    created_at: datetime
+    updated_at: datetime
+    input_pdf_bytes: Optional[bytes] = None
+    output_pdf_path: Optional[str] = None
+    detected_entities: List[DetectedEntity] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+
+app = FastAPI(title="Document Sanitization Pipeline", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -202,19 +335,211 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def startup_event() -> None:
+    JOB_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    _start_worker_if_needed()
+
+
 @app.get("/health")
 def health_check() -> Dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/api/v1/sanitize", response_model=SanitizeResponse)
-async def sanitize_document(file: UploadFile = File(...)) -> SanitizeResponse:
+@app.post(
+    "/api/v1/sanitize",
+    response_model=SanitizeJobCreateResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def sanitize_document(file: UploadFile = File(...)) -> SanitizeJobCreateResponse:
+    _cleanup_expired_jobs()
+    _start_worker_if_needed()
+
     payload = await file.read()
     _validate_pdf_upload(file, payload)
 
-    words, word_coordinate_map, phrase_coordinate_map = extract_words_with_coordinates(payload)
+    job_id = uuid4().hex
+    created_at = _utc_now()
+    filename = file.filename or "uploaded.pdf"
+
+    record = JobRecord(
+        job_id=job_id,
+        filename=filename,
+        status="queued",
+        created_at=created_at,
+        updated_at=created_at,
+        input_pdf_bytes=payload,
+    )
+
+    with JOB_LOCK:
+        JOB_STORE[job_id] = record
+
+    try:
+        JOB_QUEUE.put_nowait(job_id)
+    except Full:
+        with JOB_LOCK:
+            JOB_STORE.pop(job_id, None)
+        raise HTTPException(
+            status_code=503,
+            detail="Sanitization queue is full. Please retry shortly.",
+        )
+
+    return SanitizeJobCreateResponse(
+        job_id=job_id,
+        status="queued",
+        status_url=f"/api/v1/jobs/{job_id}",
+        download_url=f"/api/v1/download/{job_id}",
+    )
+
+
+@app.get("/api/v1/jobs/{job_id}", response_model=SanitizeJobStatusResponse)
+def get_job_status(job_id: str) -> SanitizeJobStatusResponse:
+    _cleanup_expired_jobs()
+    record = _get_job_or_404(job_id)
+
+    download_url = f"/api/v1/download/{job_id}" if record.status == "completed" else None
+
+    return SanitizeJobStatusResponse(
+        job_id=record.job_id,
+        status=record.status,
+        detected_entities=record.detected_entities,
+        warnings=record.warnings,
+        error=record.error,
+        download_url=download_url,
+    )
+
+
+@app.get("/api/v1/download/{job_id}")
+def download_redacted_pdf(job_id: str) -> FileResponse:
+    _cleanup_expired_jobs()
+    record = _get_job_or_404(job_id)
+
+    if record.status != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job {job_id} is not completed yet (current status: {record.status}).",
+        )
+
+    if not record.output_pdf_path:
+        raise HTTPException(status_code=500, detail="Redacted file path was not recorded.")
+
+    output_path = Path(record.output_pdf_path)
+    if not output_path.exists():
+        raise HTTPException(status_code=410, detail="Redacted file is no longer available.")
+
+    filename_stem = Path(record.filename).stem
+    download_name = f"sanitized_{filename_stem}.pdf"
+    return FileResponse(path=str(output_path), media_type="application/pdf", filename=download_name)
+
+
+def _start_worker_if_needed() -> None:
+    global WORKER_THREAD
+
+    if WORKER_THREAD is not None and WORKER_THREAD.is_alive():
+        return
+
+    WORKER_THREAD = Thread(target=_job_worker_loop, name="sanitize-job-worker", daemon=True)
+    WORKER_THREAD.start()
+
+
+def _job_worker_loop() -> None:
+    while True:
+        job_id = JOB_QUEUE.get()
+        try:
+            _process_job(job_id)
+        except Exception as exc:  # broad except to avoid worker thread death
+            LOGGER.exception("Unhandled exception in job worker for job %s: %s", job_id, str(exc))
+            _mark_job_failed(job_id, str(exc))
+        finally:
+            JOB_QUEUE.task_done()
+
+
+def _process_job(job_id: str) -> None:
+    with JOB_LOCK:
+        record = JOB_STORE.get(job_id)
+        if record is None:
+            return
+        payload = record.input_pdf_bytes
+        record.status = "processing"
+        record.updated_at = _utc_now()
+
+    if not payload:
+        _mark_job_failed(job_id, "No input payload available for processing.")
+        return
+
+    try:
+        detections, warnings, redacted_pdf_bytes = run_sanitization_pipeline(payload)
+        output_path = JOB_STORAGE_DIR / f"{job_id}.pdf"
+        output_path.write_bytes(redacted_pdf_bytes)
+
+        serialized_entities = serialize_detections(detections)
+        _mark_job_completed(job_id, serialized_entities, warnings, str(output_path))
+    except Exception as exc:
+        _mark_job_failed(job_id, str(exc))
+
+
+def _mark_job_completed(
+    job_id: str,
+    detected_entities: List[DetectedEntity],
+    warnings: List[str],
+    output_pdf_path: str,
+) -> None:
+    with JOB_LOCK:
+        record = JOB_STORE.get(job_id)
+        if record is None:
+            return
+        record.status = "completed"
+        record.updated_at = _utc_now()
+        record.detected_entities = detected_entities
+        record.warnings = warnings
+        record.error = None
+        record.output_pdf_path = output_pdf_path
+        record.input_pdf_bytes = None
+
+
+def _mark_job_failed(job_id: str, error: str) -> None:
+    with JOB_LOCK:
+        record = JOB_STORE.get(job_id)
+        if record is None:
+            return
+        record.status = "failed"
+        record.updated_at = _utc_now()
+        record.error = error
+        record.input_pdf_bytes = None
+
+
+def _get_job_or_404(job_id: str) -> JobRecord:
+    with JOB_LOCK:
+        record = JOB_STORE.get(job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} was not found.")
+        return record
+
+
+def _cleanup_expired_jobs() -> None:
+    expiry_cutoff = _utc_now() - timedelta(seconds=JOB_TTL_SECONDS)
+    stale_job_ids: List[str] = []
+
+    with JOB_LOCK:
+        for job_id, record in JOB_STORE.items():
+            if record.updated_at < expiry_cutoff:
+                stale_job_ids.append(job_id)
+
+        for job_id in stale_job_ids:
+            stale = JOB_STORE.pop(job_id)
+            if stale.output_pdf_path:
+                stale_path = Path(stale.output_pdf_path)
+                if stale_path.exists():
+                    try:
+                        stale_path.unlink()
+                    except OSError:
+                        LOGGER.warning("Failed to delete stale output file: %s", stale.output_pdf_path)
+
+
+def run_sanitization_pipeline(pdf_bytes: bytes) -> Tuple[List[Detection], List[str], bytes]:
+    words, word_coordinate_map, phrase_coordinate_map = extract_words_with_coordinates(pdf_bytes)
     if not words:
-        raise HTTPException(status_code=422, detail="No text could be extracted from the PDF.")
+        raise RuntimeError("No text could be extracted from the PDF.")
 
     LOGGER.info(
         "OCR extraction complete: %s words, %s unique words, %s phrase lines",
@@ -223,26 +548,16 @@ async def sanitize_document(file: UploadFile = File(...)) -> SanitizeResponse:
         len(phrase_coordinate_map),
     )
 
-    canonical_text, indexed_words = build_canonical_text_index(words)
+    canonical_text, char_map, word_spans = build_character_bbox_map(words)
     if not canonical_text.strip():
-        raise HTTPException(status_code=422, detail="Extracted text is empty after OCR processing.")
+        raise RuntimeError("Extracted text is empty after OCR processing.")
 
-    try:
-        presidio_detections = run_presidio_triage(canonical_text, indexed_words)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    presidio_detections = run_presidio_triage(canonical_text, char_map)
+    llm_detections, llm_warnings = run_llm_context_triage(canonical_text, char_map, word_spans)
+    all_detections = deduplicate_detections(presidio_detections + llm_detections)
 
-    llm_detections, llm_warnings = run_llm_context_triage(canonical_text, indexed_words)
-    all_detections = presidio_detections + llm_detections
-
-    redacted_pdf_bytes = apply_secure_redactions(payload, all_detections)
-    redacted_pdf_b64 = base64.b64encode(redacted_pdf_bytes).decode("ascii")
-
-    return SanitizeResponse(
-        detected_entities=serialize_detections(all_detections),
-        redacted_pdf_base64=redacted_pdf_b64,
-        warnings=llm_warnings,
-    )
+    redacted_pdf_bytes = apply_secure_redactions(pdf_bytes, all_detections)
+    return all_detections, llm_warnings, redacted_pdf_bytes
 
 
 def _validate_pdf_upload(file: UploadFile, payload: bytes) -> None:
@@ -267,15 +582,30 @@ def extract_words_with_coordinates(
     try:
         for page_number in range(document.page_count):
             page = document[page_number]
-            page_words = _extract_page_words_pymupdf(page, page_number)
-            if not page_words:
-                page_words = _extract_page_words_tesseract(page, page_number)
+            native_words = _extract_page_words_pymupdf(page, page_number)
+
+            if _is_page_text_meaningful(native_words):
+                page_words = native_words
+            else:
+                ocr_words = _extract_page_words_tesseract(page, page_number)
+                if ocr_words:
+                    LOGGER.info("Fell back to OCR on page %s due to weak native text layer.", page_number + 1)
+                page_words = ocr_words if ocr_words else native_words
+
             words.extend(page_words)
     finally:
         document.close()
 
     word_coordinate_map, phrase_coordinate_map = build_coordinate_maps(words)
     return words, word_coordinate_map, phrase_coordinate_map
+
+
+def _is_page_text_meaningful(page_words: Sequence[OCRWord]) -> bool:
+    if not page_words:
+        return False
+    flattened = "".join(word.text for word in page_words)
+    alnum_count = sum(1 for char in flattened if char.isalnum())
+    return alnum_count >= NATIVE_TEXT_MIN_ALNUM
 
 
 def _extract_page_words_pymupdf(page: fitz.Page, page_number: int) -> List[OCRWord]:
@@ -394,18 +724,30 @@ def build_coordinate_maps(
     return word_map, phrase_map
 
 
-def build_canonical_text_index(words: Sequence[OCRWord]) -> Tuple[str, List[IndexedWord]]:
+def build_character_bbox_map(
+    words: Sequence[OCRWord],
+) -> Tuple[str, List[Tuple[int, int, BoundingBox]], List[WordSpan]]:
     if not words:
-        return "", []
+        return "", [], []
 
     text_parts: List[str] = []
-    indexed_words: List[IndexedWord] = []
+    char_map: List[Tuple[int, int, BoundingBox]] = []
+    word_spans: List[WordSpan] = []
+
     cursor = 0
     previous_page = words[0].bbox.page_number
+    previous_line_key = words[0].line_key
+    previous_text = ""
 
     for index, word in enumerate(words):
         if index > 0:
-            separator = "\n" if word.bbox.page_number != previous_page else " "
+            if word.bbox.page_number != previous_page:
+                separator = "\n"
+            elif previous_text.endswith("-") and previous_line_key != word.line_key:
+                separator = ""
+            else:
+                separator = " "
+
             text_parts.append(separator)
             cursor += len(separator)
 
@@ -414,46 +756,55 @@ def build_canonical_text_index(words: Sequence[OCRWord]) -> Tuple[str, List[Inde
         cursor += len(word.text)
         end_char = cursor
 
-        indexed_words.append(
-            IndexedWord(
-                word=word,
+        char_map.append((start_char, end_char, word.bbox))
+        word_spans.append(
+            WordSpan(
+                text=word.text,
                 start_char=start_char,
                 end_char=end_char,
+                bbox=word.bbox,
+                line_key=word.line_key,
             )
         )
+
         previous_page = word.bbox.page_number
+        previous_line_key = word.line_key
+        previous_text = word.text
 
-    return "".join(text_parts), indexed_words
+    return "".join(text_parts), char_map, word_spans
 
 
-def span_to_bboxes(start_char: int, end_char: int, indexed_words: Sequence[IndexedWord]) -> List[BoundingBox]:
+def get_bboxes_for_offsets(
+    start_char: int,
+    end_char: int,
+    char_map: Sequence[Tuple[int, int, BoundingBox]],
+) -> List[BoundingBox]:
     if end_char <= start_char:
         return []
 
-    overlapping_words = [
-        token.word
-        for token in indexed_words
-        if token.start_char < end_char and token.end_char > start_char
+    overlapping_boxes = [
+        bbox
+        for span_start, span_end, bbox in char_map
+        if span_start < end_char and span_end > start_char
     ]
-    if not overlapping_words:
-        return []
-
-    grouped: Dict[Tuple[int, str], List[BoundingBox]] = {}
-    for word in overlapping_words:
-        grouped.setdefault((word.bbox.page_number, word.line_key), []).append(word.bbox)
-
-    merged_boxes = [_merge_boxes(boxes) for boxes in grouped.values()]
-    return sorted(merged_boxes, key=lambda box: (box.page_number, box.y0, box.x0))
+    return deduplicate_boxes(sorted(overlapping_boxes, key=lambda box: (box.page_number, box.y0, box.x0)))
 
 
-def run_presidio_triage(canonical_text: str, indexed_words: Sequence[IndexedWord]) -> List[Detection]:
+def run_presidio_triage(
+    canonical_text: str,
+    char_map: Sequence[Tuple[int, int, BoundingBox]],
+) -> List[Detection]:
     if not canonical_text.strip():
         return []
 
     analyzer = _get_analyzer()
     target_entities = _resolve_target_pii_entities(analyzer)
+    analyzable_text, offset_map = _prepare_text_for_presidio(canonical_text)
+    if not analyzable_text.strip():
+        return []
+
     results = analyzer.analyze(
-        text=canonical_text,
+        text=analyzable_text,
         entities=target_entities,
         language="en",
     )
@@ -463,16 +814,34 @@ def run_presidio_triage(canonical_text: str, indexed_words: Sequence[IndexedWord
         if result.end <= result.start:
             continue
 
-        entity_text = canonical_text[result.start : result.end]
-        boxes = span_to_bboxes(result.start, result.end, indexed_words)
+        confidence = float(result.score or 0.0)
+        if confidence < MIN_ENTITY_CONFIDENCE:
+            continue
+
+        remapped_offsets = _remap_offsets_to_canonical(
+            result.start,
+            result.end,
+            offset_map,
+            len(canonical_text),
+        )
+        if remapped_offsets is None:
+            continue
+
+        canonical_start, canonical_end = remapped_offsets
+        entity_text = canonical_text[canonical_start:canonical_end].strip()
+        if not entity_text:
+            continue
+
+        boxes = get_bboxes_for_offsets(canonical_start, canonical_end, char_map)
         if not boxes:
             continue
 
+        entity_type = _reclassify_entity_type(entity_text, result.entity_type)
         detections.append(
             Detection(
                 entity_text=entity_text,
-                entity_type=result.entity_type,
-                confidence_score=float(result.score or 0.0),
+                entity_type=entity_type,
+                confidence_score=confidence,
                 source="Presidio",
                 boxes=boxes,
             )
@@ -483,14 +852,16 @@ def run_presidio_triage(canonical_text: str, indexed_words: Sequence[IndexedWord
 
 def run_llm_context_triage(
     canonical_text: str,
-    indexed_words: Sequence[IndexedWord],
+    char_map: Sequence[Tuple[int, int, BoundingBox]],
+    word_spans: Sequence[WordSpan],
 ) -> Tuple[List[Detection], List[str]]:
     warnings: List[str] = []
 
-    api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("LITELLM_API_KEY")
+    api_key = _get_openrouter_api_key()
     if not api_key:
         warnings.append(
-            "LLM step skipped: OPENROUTER_API_KEY or LITELLM_API_KEY is not configured. "
+            "LLM step skipped: OPENROUTER_API_KEY is not configured. "
+            "(OPENAI_API_KEY is also accepted as fallback.) "
             "Pipeline continued with Presidio-only detections."
         )
         return [], warnings
@@ -500,15 +871,15 @@ def run_llm_context_triage(
     text_slice = canonical_text[:LLM_TEXT_CHAR_LIMIT]
 
     try:
-        response = completion(
-            model=model,
-            api_key=api_key,
+        response_json = _call_openrouter_chat_completion(
             api_base=api_base,
+            api_key=api_key,
+            model=model,
             messages=_build_llm_messages(text_slice),
-            temperature=0,
-            max_tokens=350,
+            temperature=0.0,
+            max_tokens=450,
         )
-        raw_content = _read_completion_content(response)
+        raw_content = _read_completion_content(response_json)
     except Exception as exc:  # broad except to guarantee fallback behavior
         warnings.append(
             "LLM step failed and pipeline continued with Presidio-only detections: "
@@ -516,34 +887,43 @@ def run_llm_context_triage(
         )
         return [], warnings
 
-    quotes = _parse_llm_json_array(raw_content)
-    if not quotes:
-        warnings.append("LLM response did not contain a strict JSON array of string quotes.")
+    candidates = _parse_llm_quote_candidates(raw_content)
+    if not candidates:
+        warnings.append("LLM response did not contain a strict JSON array of quote-confidence objects.")
         return [], warnings
 
     detections: List[Detection] = []
-    for quote in quotes:
-        spans = find_exact_spans(canonical_text, quote)
-        if not spans:
+    for candidate in candidates:
+        matches = find_fuzzy_spans(candidate.quote, word_spans, threshold=FUZZY_MATCH_THRESHOLD)
+        if not matches:
             continue
 
-        inferred_type = classify_llm_quote_type(quote)
-        for start_char, end_char in spans:
-            boxes = span_to_bboxes(start_char, end_char, indexed_words)
+        inferred_type = classify_llm_quote_type(candidate.quote)
+        for start_char, end_char, similarity_score in matches:
+            fuzzy_conf = max(0.0, min(1.0, similarity_score / 100.0))
+            combined_conf = (candidate.confidence + fuzzy_conf) / 2.0
+            if combined_conf < MIN_ENTITY_CONFIDENCE:
+                continue
+
+            boxes = get_bboxes_for_offsets(start_char, end_char, char_map)
             if not boxes:
                 continue
+
+            localized_text = canonical_text[start_char:end_char].strip() or candidate.quote
             detections.append(
                 Detection(
-                    entity_text=quote,
+                    entity_text=localized_text,
                     entity_type=inferred_type,
-                    confidence_score=0.85,
+                    confidence_score=combined_conf,
                     source="LLM",
                     boxes=boxes,
                 )
             )
 
     if not detections:
-        warnings.append("LLM returned quotes, but none matched OCR text exactly for localization.")
+        warnings.append(
+            "LLM returned quotes, but fuzzy matching did not localize any quote at >= 92% similarity."
+        )
 
     return detections, warnings
 
@@ -563,10 +943,65 @@ def classify_llm_quote_type(quote: str) -> str:
     return "LEGAL_PARTY_NAME"
 
 
-def find_exact_spans(text: str, quote: str) -> List[Tuple[int, int]]:
-    if not text or not quote:
+def find_fuzzy_spans(
+    quote: str,
+    word_spans: Sequence[WordSpan],
+    threshold: int = FUZZY_MATCH_THRESHOLD,
+) -> List[Tuple[int, int, float]]:
+    normalized_quote = _normalize_for_fuzzy(quote)
+    if not normalized_quote or not word_spans:
         return []
-    return [(match.start(), match.end()) for match in re.finditer(re.escape(quote), text)]
+
+    token_count = max(1, len(quote.split()))
+    window_sizes = sorted(
+        {
+            max(1, token_count - 2),
+            max(1, token_count - 1),
+            token_count,
+            token_count + 1,
+            token_count + 2,
+        }
+    )
+
+    candidates: List[Tuple[float, int, int]] = []
+    total_words = len(word_spans)
+
+    for start_index in range(total_words):
+        for window_size in window_sizes:
+            end_index = start_index + window_size
+            if end_index > total_words:
+                continue
+
+            left = word_spans[start_index]
+            right = word_spans[end_index - 1]
+            if left.bbox.page_number != right.bbox.page_number:
+                continue
+
+            candidate_text = " ".join(item.text for item in word_spans[start_index:end_index])
+            normalized_candidate = _normalize_for_fuzzy(candidate_text)
+            if not normalized_candidate:
+                continue
+
+            similarity = max(
+                float(fuzz.ratio(normalized_quote, normalized_candidate)),
+                float(fuzz.token_sort_ratio(normalized_quote, normalized_candidate)),
+            )
+            if similarity < threshold:
+                continue
+
+            candidates.append((similarity, left.start_char, right.end_char))
+
+    selected: List[Tuple[float, int, int]] = []
+    for similarity, start_char, end_char in sorted(candidates, key=lambda item: (-item[0], item[1], item[2])):
+        overlaps = any(
+            not (end_char <= chosen_start or start_char >= chosen_end)
+            for _similarity, chosen_start, chosen_end in selected
+        )
+        if overlaps:
+            continue
+        selected.append((similarity, start_char, end_char))
+
+    return [(start_char, end_char, similarity) for similarity, start_char, end_char in selected]
 
 
 def apply_secure_redactions(pdf_bytes: bytes, detections: Sequence[Detection]) -> bytes:
@@ -590,13 +1025,50 @@ def apply_secure_redactions(pdf_bytes: bytes, detections: Sequence[Detection]) -
                 rect = fitz.Rect(box.x0, box.y0, box.x1, box.y1)
                 if rect.is_empty or rect.is_infinite:
                     continue
-                page.add_redact_annot(rect, fill=(0, 0, 0))
+                page.add_redact_annot(quad=rect, fill=(0, 0, 0))
 
-            page.apply_redactions()
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
         return document.tobytes(garbage=4, deflate=True, clean=True)
     finally:
         document.close()
+
+
+def deduplicate_detections(detections: Sequence[Detection]) -> List[Detection]:
+    deduplicated: Dict[Tuple[str, str], Detection] = {}
+
+    for detection in detections:
+        confidence = float(detection.confidence_score)
+        if confidence < MIN_ENTITY_CONFIDENCE:
+            continue
+
+        normalized_text = re.sub(r"\s+", " ", detection.entity_text).strip().lower()
+        if not normalized_text:
+            continue
+
+        key = (normalized_text, detection.entity_type)
+        if key not in deduplicated:
+            deduplicated[key] = Detection(
+                entity_text=detection.entity_text.strip(),
+                entity_type=detection.entity_type,
+                confidence_score=confidence,
+                source=detection.source,
+                boxes=deduplicate_boxes(detection.boxes),
+            )
+            continue
+
+        existing = deduplicated[key]
+        existing.boxes = deduplicate_boxes(existing.boxes + detection.boxes)
+        if confidence > existing.confidence_score or (
+            confidence == existing.confidence_score and detection.source == "Presidio"
+        ):
+            existing.confidence_score = confidence
+            existing.source = detection.source
+
+    return sorted(
+        deduplicated.values(),
+        key=lambda item: (item.entity_type, item.entity_text.lower()),
+    )
 
 
 def serialize_detections(detections: Sequence[Detection]) -> List[DetectedEntity]:
@@ -658,7 +1130,8 @@ def _merge_boxes(boxes: Sequence[BoundingBox]) -> BoundingBox:
 def _build_llm_messages(document_text: str) -> List[Dict[str, str]]:
     system_prompt = (
         "You extract confidentiality entities from legal and corporate documents. "
-        "Return ONLY a strict JSON array of exact strings that appear verbatim in the input."
+        "Return ONLY a strict JSON array of objects with keys quote and confidence. "
+        "confidence must be a decimal from 0 to 1. quote must be verbatim from input."
     )
 
     user_prompt = f"""
@@ -671,21 +1144,36 @@ Example 1
 Input:
 This Service Agreement is between Acme Holdings LLC and Beta Logistics Inc. A breach triggers liquidated damages of $250,000. Governing law is Texas.
 Output:
-["Acme Holdings LLC", "Beta Logistics Inc.", "$250,000", "Texas"]
+[
+  {{"quote":"Acme Holdings LLC","confidence":0.97}},
+  {{"quote":"Beta Logistics Inc.","confidence":0.96}},
+  {{"quote":"$250,000","confidence":0.98}},
+  {{"quote":"Texas","confidence":0.95}}
+]
 
 Example 2
 Input:
 The parties Northwind Energy Ltd. and Sunrise Manufacturing Co. agree that late delivery incurs a penalty of $1,500,000 under California law.
 Output:
-["Northwind Energy Ltd.", "Sunrise Manufacturing Co.", "$1,500,000", "California"]
+[
+  {{"quote":"Northwind Energy Ltd.","confidence":0.96}},
+  {{"quote":"Sunrise Manufacturing Co.","confidence":0.96}},
+  {{"quote":"$1,500,000","confidence":0.98}},
+  {{"quote":"California","confidence":0.95}}
+]
 
 Example 3
 Input:
 This contract binds Apex Insurance Group with Riverview Clinics. Non-compliance results in damages of $75,000 and disputes are resolved in New York.
 Output:
-["Apex Insurance Group", "Riverview Clinics", "$75,000", "New York"]
+[
+  {{"quote":"Apex Insurance Group","confidence":0.95}},
+  {{"quote":"Riverview Clinics","confidence":0.95}},
+  {{"quote":"$75,000","confidence":0.98}},
+  {{"quote":"New York","confidence":0.95}}
+]
 
-Now process the following text and return only a strict JSON array of strings:
+Now process the following text and return only the strict JSON array of objects:
 {document_text}
 """.strip()
 
@@ -724,36 +1212,348 @@ def _read_completion_content(response: object) -> str:
     return str(content or "")
 
 
-def _parse_llm_json_array(raw_content: str) -> List[str]:
+def _call_openrouter_chat_completion(
+    api_base: str,
+    api_key: str,
+    model: str,
+    messages: List[Dict[str, str]],
+    temperature: float,
+    max_tokens: int,
+) -> Dict[str, Any]:
+    normalized_base = _normalize_openrouter_api_base(api_base)
+    endpoint = f"{normalized_base.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "authentication": f"Bearer {api_key}",
+        "X-API-Key": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    referer = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+    if referer:
+        headers["HTTP-Referer"] = referer
+
+    x_title = os.getenv("OPENROUTER_X_TITLE", "snv-PII-redact").strip()
+    if x_title:
+        headers["X-Title"] = x_title
+
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+
+    response = requests.post(
+        endpoint,
+        headers=headers,
+        json=payload,
+        timeout=LLM_REQUEST_TIMEOUT_SECONDS,
+        allow_redirects=False,
+    )
+
+    if response.status_code in {301, 302, 307, 308}:
+        redirect_target = response.headers.get("Location", "").strip()
+        if redirect_target:
+            redirected_endpoint = redirect_target
+            if redirect_target.startswith("/"):
+                redirected_endpoint = urljoin(endpoint, redirect_target)
+
+            response = requests.post(
+                redirected_endpoint,
+                headers=headers,
+                json=payload,
+                timeout=LLM_REQUEST_TIMEOUT_SECONDS,
+                allow_redirects=False,
+            )
+
+    if response.status_code >= 400:
+        message = response.text.strip()
+        if len(message) > 400:
+            message = f"{message[:400]}..."
+        if response.status_code == 401 and "Missing Authentication header" in message:
+            raise RuntimeError(
+                "OpenRouter API error 401: Missing Authentication header. "
+                "Sent Authorization header, but upstream did not receive it. "
+                "Verify OPENROUTER_API_BASE is https://openrouter.ai/api/v1 and OPENROUTER_API_KEY is the raw token."
+            )
+        raise RuntimeError(f"OpenRouter API error {response.status_code}: {message}")
+
+    try:
+        parsed = response.json()
+    except ValueError as exc:
+        raise RuntimeError("OpenRouter API returned a non-JSON response.") from exc
+
+    if not isinstance(parsed, dict):
+        raise RuntimeError("OpenRouter API response shape is invalid.")
+
+    return parsed
+
+
+def _parse_llm_quote_candidates(raw_content: str) -> List[LLMQuoteCandidate]:
     if not raw_content:
         return []
 
-    def coerce_quotes(data: object) -> List[str]:
-        if not isinstance(data, list):
-            return []
-
-        deduped: List[str] = []
-        seen = set()
-        for item in data:
-            if not isinstance(item, str):
-                continue
-            candidate = item.strip()
-            if not candidate or candidate in seen:
-                continue
-            seen.add(candidate)
-            deduped.append(candidate)
-        return deduped
-
     try:
-        return coerce_quotes(json.loads(raw_content.strip()))
+        parsed = json.loads(raw_content.strip())
     except json.JSONDecodeError:
         match = re.search(r"\[[\s\S]*\]", raw_content)
         if not match:
             return []
         try:
-            return coerce_quotes(json.loads(match.group(0)))
+            parsed = json.loads(match.group(0))
         except json.JSONDecodeError:
             return []
+
+    if not isinstance(parsed, list):
+        return []
+
+    deduped: Dict[str, LLMQuoteCandidate] = {}
+    for item in parsed:
+        quote = ""
+        confidence_raw: Any = 0.85
+
+        if isinstance(item, str):
+            quote = item.strip()
+        elif isinstance(item, dict):
+            quote = str(item.get("quote") or item.get("text") or "").strip()
+            confidence_raw = item.get("confidence", item.get("score", 0.85))
+        else:
+            continue
+
+        if not quote:
+            continue
+
+        confidence_value = _safe_float(confidence_raw, default=0.85)
+        if confidence_value > 1:
+            confidence_value = confidence_value / 100.0
+        confidence_value = max(0.0, min(1.0, confidence_value))
+
+        key = re.sub(r"\s+", " ", quote).strip().lower()
+        existing = deduped.get(key)
+        if existing is None or confidence_value > existing.confidence:
+            deduped[key] = LLMQuoteCandidate(quote=quote, confidence=confidence_value)
+
+    return list(deduped.values())
+
+
+def _prepare_text_for_presidio(canonical_text: str) -> Tuple[str, List[int]]:
+    value_segments = _extract_json_value_segments(canonical_text)
+    if not value_segments:
+        return canonical_text, list(range(len(canonical_text)))
+
+    projected_text, projected_offset_map = _project_text_from_segments(canonical_text, value_segments)
+    if not projected_text.strip() or not projected_offset_map:
+        return "", []
+
+    return projected_text, projected_offset_map
+
+
+def _extract_json_value_segments(canonical_text: str) -> List[Tuple[int, int]]:
+    decoder = json.JSONDecoder()
+    collected_segments: List[Tuple[int, int]] = []
+    cursor = 0
+
+    while cursor < len(canonical_text):
+        opening = re.search(r"[\{\[]", canonical_text[cursor:])
+        if not opening:
+            break
+
+        start_index = cursor + opening.start()
+        try:
+            parsed_obj, consumed = decoder.raw_decode(canonical_text[start_index:])
+        except json.JSONDecodeError:
+            cursor = start_index + 1
+            continue
+
+        end_index = start_index + consumed
+        collected_segments.extend(_locate_value_segments_in_json(canonical_text, start_index, end_index, parsed_obj))
+        cursor = end_index
+
+    if collected_segments:
+        return _normalize_segments(collected_segments)
+
+    regex_segments = _extract_json_value_segments_regex(canonical_text)
+    return _normalize_segments(regex_segments)
+
+
+def _extract_json_value_segments_regex(canonical_text: str) -> List[Tuple[int, int]]:
+    pattern = re.compile(
+        r'(?P<key>"?[A-Za-z0-9_.-]+"?)\s*:\s*(?P<value>"(?:\\.|[^"])*"|[^,\}\]\n]+)'
+    )
+    segments: List[Tuple[int, int]] = []
+
+    for match in pattern.finditer(canonical_text):
+        raw_key = match.group("key").strip().strip('"')
+        if _is_ignored_key(raw_key):
+            continue
+
+        value_start = match.start("value")
+        value_end = match.end("value")
+
+        while value_start < value_end and canonical_text[value_start].isspace():
+            value_start += 1
+        while value_end > value_start and canonical_text[value_end - 1].isspace():
+            value_end -= 1
+
+        if value_end - value_start >= 2 and canonical_text[value_start] == '"' and canonical_text[value_end - 1] == '"':
+            value_start += 1
+            value_end -= 1
+
+        if value_start < value_end:
+            segments.append((value_start, value_end))
+
+    return segments
+
+
+def _locate_value_segments_in_json(
+    canonical_text: str,
+    segment_start: int,
+    segment_end: int,
+    parsed_obj: Any,
+) -> List[Tuple[int, int]]:
+    flat_values = _flatten_json_values(parsed_obj)
+    if not flat_values:
+        return []
+
+    scope_text = canonical_text[segment_start:segment_end]
+    scoped_segments: List[Tuple[int, int]] = []
+
+    for key_path, raw_value in flat_values:
+        if _is_ignored_key(key_path):
+            continue
+
+        value_text = _json_scalar_to_text(raw_value).strip()
+        if not value_text:
+            continue
+
+        for match in re.finditer(re.escape(value_text), scope_text):
+            abs_start = segment_start + match.start()
+            abs_end = segment_start + match.end()
+            if any(_ranges_overlap(abs_start, abs_end, start, end) for start, end in scoped_segments):
+                continue
+            scoped_segments.append((abs_start, abs_end))
+            break
+
+    return scoped_segments
+
+
+def _flatten_json_values(value: Any, parent_key: str = "") -> List[Tuple[str, Any]]:
+    flattened: List[Tuple[str, Any]] = []
+
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            key_part = str(key).strip()
+            key_path = f"{parent_key}.{key_part}" if parent_key else key_part
+            if _is_ignored_key(key_path):
+                continue
+
+            if isinstance(nested_value, (dict, list)):
+                flattened.extend(_flatten_json_values(nested_value, key_path))
+            else:
+                flattened.append((key_path, nested_value))
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, (dict, list)):
+                flattened.extend(_flatten_json_values(item, parent_key))
+            else:
+                flattened.append((parent_key, item))
+
+    return flattened
+
+
+def _project_text_from_segments(canonical_text: str, segments: Sequence[Tuple[int, int]]) -> Tuple[str, List[int]]:
+    chunks: List[str] = []
+    offset_map: List[int] = []
+
+    for index, (start_char, end_char) in enumerate(segments):
+        if start_char >= end_char:
+            continue
+
+        if index > 0:
+            chunks.append("\n")
+            anchor = max(0, start_char - 1)
+            offset_map.append(anchor)
+
+        chunks.append(canonical_text[start_char:end_char])
+        offset_map.extend(range(start_char, end_char))
+
+    return "".join(chunks), offset_map
+
+
+def _normalize_segments(segments: Sequence[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    filtered = sorted((start, end) for start, end in segments if end > start)
+    if not filtered:
+        return []
+
+    normalized: List[Tuple[int, int]] = []
+    for start, end in filtered:
+        if not normalized:
+            normalized.append((start, end))
+            continue
+
+        previous_start, previous_end = normalized[-1]
+        if start <= previous_end:
+            normalized[-1] = (previous_start, max(previous_end, end))
+        else:
+            normalized.append((start, end))
+
+    return normalized
+
+
+def _json_scalar_to_text(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _is_ignored_key(key_path: str) -> bool:
+    lower_key = key_path.lower()
+    if lower_key in IGNORE_JSON_KEYS:
+        return True
+    return lower_key.split(".")[-1] in {"id", "filename"}
+
+
+def _ranges_overlap(start_a: int, end_a: int, start_b: int, end_b: int) -> bool:
+    return start_a < end_b and end_a > start_b
+
+
+def _remap_offsets_to_canonical(
+    start_char: int,
+    end_char: int,
+    offset_map: Sequence[int],
+    canonical_length: int,
+) -> Optional[Tuple[int, int]]:
+    if canonical_length <= 0 or end_char <= start_char or not offset_map:
+        return None
+
+    bounded_start = max(0, min(start_char, len(offset_map) - 1))
+    bounded_end = max(0, min(end_char - 1, len(offset_map) - 1))
+
+    canonical_start = offset_map[bounded_start]
+    canonical_end = offset_map[bounded_end] + 1
+
+    if canonical_end <= canonical_start:
+        return None
+
+    return canonical_start, canonical_end
+
+
+def _reclassify_entity_type(entity_text: str, original_type: str) -> str:
+    if original_type != "PERSON":
+        return original_type
+    if BUSINESS_KEYWORD_PATTERN.search(entity_text):
+        return "ORGANIZATION"
+    return original_type
+
+
+def _normalize_for_fuzzy(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text.upper()).strip()
+    normalized = re.sub(r"(?<=\d)[OQ](?=\d|$)", "0", normalized)
+    return normalized
 
 
 def _safe_float(value: object, default: float = 0.0) -> float:
@@ -807,16 +1607,34 @@ def _get_analyzer() -> AnalyzerEngine:
     if _ANALYZER is not None:
         return _ANALYZER
 
+    nlp_configuration = {
+        "nlp_engine_name": "spacy",
+        "models": [{"lang_code": "en", "model_name": DEFAULT_SPACY_MODEL}],
+    }
+
     try:
-        _ANALYZER = AnalyzerEngine()
+        provider = NlpEngineProvider(nlp_configuration=nlp_configuration)
+        nlp_engine = provider.create_engine()
+        _ANALYZER = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
     except Exception as primary_exc:
-        LOGGER.warning("Default Presidio initialization failed: %s", str(primary_exc))
+        LOGGER.warning("Transformer Presidio initialization failed: %s", str(primary_exc))
         try:
-            _ANALYZER = AnalyzerEngine(nlp_engine=None, supported_languages=["en"])
+            fallback_provider = NlpEngineProvider(
+                nlp_configuration={
+                    "nlp_engine_name": "spacy",
+                    "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+                }
+            )
+            fallback_engine = fallback_provider.create_engine()
+            _ANALYZER = AnalyzerEngine(nlp_engine=fallback_engine, supported_languages=["en"])
         except Exception as fallback_exc:
             raise RuntimeError(
                 "Presidio AnalyzerEngine could not initialize. "
-                "Install spaCy model with: python -m spacy download en_core_web_sm"
+                "Install spaCy transformer model with: python -m spacy download en_core_web_trf"
             ) from fallback_exc
 
     return _ANALYZER
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
