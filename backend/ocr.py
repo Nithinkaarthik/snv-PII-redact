@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 from typing import Dict, List, Sequence, Tuple
 
 import fitz
@@ -17,31 +18,66 @@ except ImportError:
     from text_mapping import build_coordinate_maps
 
 
+_DEBUG_FALSE_VALUES = {"0", "false", "no", "off"}
+_DEBUG_ENABLED = os.getenv("BACKEND_DEBUG_BLOCKS", "0").strip().lower() not in _DEBUG_FALSE_VALUES
+
+
+def _debug(message: str, *args: object) -> None:
+    if not _DEBUG_ENABLED:
+        return
+    LOGGER.info("[DEBUG] " + message, *args)
+
+
 def extract_words_with_coordinates(
     pdf_bytes: bytes,
 ) -> Tuple[List[OCRWord], Dict[str, List[BoundingBox]], Dict[str, List[BoundingBox]]]:
     document = fitz.open(stream=pdf_bytes, filetype="pdf")
     words: List[OCRWord] = []
+    _debug("OCR_PIPELINE_START pages=%s", document.page_count)
 
     try:
         for page_number in range(document.page_count):
             page = document[page_number]
-            native_words = _extract_page_words_pymupdf(page, page_number)
-
-            if _is_page_text_meaningful(native_words):
-                page_words = native_words
-            else:
-                ocr_words = _extract_page_words_tesseract(page, page_number)
-                if ocr_words:
-                    LOGGER.info("Fell back to OCR on page %s due to weak native text layer.", page_number + 1)
-                page_words = ocr_words if ocr_words else native_words
-
+            page_words = extract_page_words(page, page_number)
             words.extend(page_words)
+            _debug("OCR_PAGE_DONE page=%s words=%s", page_number + 1, len(page_words))
     finally:
         document.close()
 
     word_coordinate_map, phrase_coordinate_map = build_coordinate_maps(words)
+    _debug(
+        "OCR_PIPELINE_FINISH total_words=%s unique_words=%s phrase_lines=%s",
+        len(words),
+        len(word_coordinate_map),
+        len(phrase_coordinate_map),
+    )
     return words, word_coordinate_map, phrase_coordinate_map
+
+
+def extract_page_words(page: fitz.Page, page_number: int) -> List[OCRWord]:
+    native_words = _extract_page_words_pymupdf(page, page_number)
+    is_meaningful = _is_page_text_meaningful(native_words)
+    _debug(
+        "PAGE_TEXT_CHECK page=%s native_words=%s meaningful=%s min_alnum=%s",
+        page_number + 1,
+        len(native_words),
+        is_meaningful,
+        NATIVE_TEXT_MIN_ALNUM,
+    )
+
+    if is_meaningful:
+        _debug("PAGE_SOURCE_SELECTED page=%s source=native", page_number + 1)
+        return native_words
+
+    _debug("PAGE_SOURCE_SELECTED page=%s source=ocr_fallback", page_number + 1)
+    ocr_words = _extract_page_words_tesseract(page, page_number)
+    if ocr_words:
+        LOGGER.info("Fell back to OCR on page %s due to weak native text layer.", page_number + 1)
+        _debug("OCR_FALLBACK_RESULT page=%s ocr_words=%s", page_number + 1, len(ocr_words))
+        return ocr_words
+
+    _debug("OCR_FALLBACK_EMPTY page=%s returning_native_words=%s", page_number + 1, len(native_words))
+    return native_words
 
 
 def _is_page_text_meaningful(page_words: Sequence[OCRWord]) -> bool:
@@ -81,15 +117,26 @@ def _extract_page_words_pymupdf(page: fitz.Page, page_number: int) -> List[OCRWo
 
 
 def _extract_page_words_tesseract(page: fitz.Page, page_number: int) -> List[OCRWord]:
-    matrix = fitz.Matrix(2.0, 2.0)
+    ocr_render_scale = _safe_float(os.getenv("OCR_RENDER_SCALE", "1.5"), default=1.5)
+    if ocr_render_scale <= 0:
+        ocr_render_scale = 1.5
+
+    matrix = fitz.Matrix(ocr_render_scale, ocr_render_scale)
     pixmap = page.get_pixmap(matrix=matrix, alpha=False)
     image = Image.open(io.BytesIO(pixmap.tobytes("png")))
+    tesseract_config = os.getenv("TESSERACT_CONFIG", "--oem 3 --psm 6").strip() or "--oem 3 --psm 6"
+    _debug(
+        "OCR_RENDER page=%s scale=%.2f config=%s",
+        page_number + 1,
+        ocr_render_scale,
+        tesseract_config,
+    )
 
     try:
         ocr_data = pytesseract.image_to_data(
             image,
             output_type=pytesseract.Output.DICT,
-            config="--oem 3 --psm 6",
+            config=tesseract_config,
         )
     except pytesseract.TesseractNotFoundError:
         LOGGER.warning("Tesseract executable was not found on PATH.")
@@ -105,17 +152,22 @@ def _extract_page_words_tesseract(page: fitz.Page, page_number: int) -> List[OCR
     blocks = ocr_data.get("block_num", [])
     paragraphs = ocr_data.get("par_num", [])
     lines = ocr_data.get("line_num", [])
+    _debug("OCR_RAW_OUTPUT page=%s candidates=%s", page_number + 1, len(texts))
 
     zoom_x = matrix.a
     zoom_y = matrix.d
+    skipped_empty = 0
+    skipped_conf = 0
 
     for index, raw_text in enumerate(texts):
         clean_text = str(raw_text).strip()
         if not clean_text:
+            skipped_empty += 1
             continue
 
         confidence = _safe_float(confs[index] if index < len(confs) else "-1", default=-1.0)
         if confidence < 0:
+            skipped_conf += 1
             continue
 
         left = _safe_float(lefts[index] if index < len(lefts) else 0.0) / zoom_x
@@ -143,6 +195,13 @@ def _extract_page_words_tesseract(page: fitz.Page, page_number: int) -> List[OCR
             )
         )
 
+    _debug(
+        "OCR_PARSE_RESULT page=%s accepted=%s skipped_empty=%s skipped_conf=%s",
+        page_number + 1,
+        len(extracted),
+        skipped_empty,
+        skipped_conf,
+    )
     return extracted
 
 

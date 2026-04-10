@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -8,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Full, Queue
 from threading import Lock, Thread
-from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 from urllib.parse import urljoin
 from uuid import uuid4
 
@@ -77,11 +78,11 @@ except ImportError:
 
 try:
     from backend.models import BoundingBox, OCRWord, WordSpan
-    from backend.ocr import extract_words_with_coordinates
+    from backend.ocr import extract_page_words
     from backend.text_mapping import build_character_bbox_map, deduplicate_boxes, get_bboxes_for_offsets
 except ImportError:
     from models import BoundingBox, OCRWord, WordSpan
-    from ocr import extract_words_with_coordinates
+    from ocr import extract_page_words
     from text_mapping import build_character_bbox_map, deduplicate_boxes, get_bboxes_for_offsets
 
 JobStatus = Literal["queued", "processing", "completed", "failed"]
@@ -91,6 +92,10 @@ WORKER_THREAD: Optional[Thread] = None
 JOB_QUEUE: Queue[str] = Queue(maxsize=MAX_JOB_QUEUE_SIZE)
 JOB_STORE: Dict[str, "JobRecord"] = {}
 JOB_LOCK = Lock()
+JOB_STATUS: Dict[str, Dict[str, Any]] = {}
+JOB_STATUS_LOCK = Lock()
+_DEBUG_FALSE_VALUES = {"0", "false", "no", "off"}
+DEBUG_BLOCKS_ENABLED = os.getenv("BACKEND_DEBUG_BLOCKS", "0").strip().lower() not in _DEBUG_FALSE_VALUES
 
 
 class BBoxModel(BaseModel):
@@ -119,6 +124,8 @@ class SanitizeJobCreateResponse(BaseModel):
 class SanitizeJobStatusResponse(BaseModel):
     job_id: str
     status: JobStatus
+    progress: float = Field(default=0.0, ge=0.0, le=1.0)
+    status_message: Optional[str] = None
     detected_entities: List[DetectedEntity] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     error: Optional[str] = None
@@ -148,6 +155,7 @@ class JobRecord:
     status: JobStatus
     created_at: datetime
     updated_at: datetime
+    input_pdf_path: Optional[str] = None
     input_pdf_bytes: Optional[bytes] = None
     output_pdf_path: Optional[str] = None
     detected_entities: List[DetectedEntity] = field(default_factory=list)
@@ -191,6 +199,15 @@ async def sanitize_document(file: UploadFile = File(...)) -> SanitizeJobCreateRe
     job_id = uuid4().hex
     created_at = _utc_now()
     filename = file.filename or "uploaded.pdf"
+    input_path = JOB_STORAGE_DIR / f"{job_id}.input.pdf"
+
+    try:
+        input_path.write_bytes(payload)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unable to persist uploaded PDF for processing: {str(exc)}",
+        ) from exc
 
     record = JobRecord(
         job_id=job_id,
@@ -198,17 +215,41 @@ async def sanitize_document(file: UploadFile = File(...)) -> SanitizeJobCreateRe
         status="queued",
         created_at=created_at,
         updated_at=created_at,
-        input_pdf_bytes=payload,
+        input_pdf_path=str(input_path),
+        input_pdf_bytes=None,
     )
 
     with JOB_LOCK:
         JOB_STORE[job_id] = record
+
+    _update_job_status(
+        job_id,
+        progress=0.0,
+        status_message="Queued",
+        state="queued",
+        error=None,
+    )
+    _log_debug_block(
+        "JOB_QUEUED",
+        job_id=job_id,
+        filename=filename,
+        upload_bytes=len(payload),
+        queue_size=JOB_QUEUE.qsize(),
+    )
 
     try:
         JOB_QUEUE.put_nowait(job_id)
     except Full:
         with JOB_LOCK:
             JOB_STORE.pop(job_id, None)
+        _delete_file_quietly(str(input_path))
+        _update_job_status(
+            job_id,
+            progress=0.0,
+            status_message="FAILED",
+            state="failed",
+            error="Sanitization queue is full. Please retry shortly.",
+        )
         raise HTTPException(
             status_code=503,
             detail="Sanitization queue is full. Please retry shortly.",
@@ -226,12 +267,17 @@ async def sanitize_document(file: UploadFile = File(...)) -> SanitizeJobCreateRe
 def get_job_status(job_id: str) -> SanitizeJobStatusResponse:
     _cleanup_expired_jobs()
     record = _get_job_or_404(job_id)
+    progress_state = _read_job_status(job_id)
 
     download_url = f"/api/v1/download/{job_id}" if record.status == "completed" else None
+    progress = float(progress_state.get("progress", 1.0 if record.status == "completed" else 0.0))
+    status_message = str(progress_state.get("status") or record.status)
 
     return SanitizeJobStatusResponse(
         job_id=record.job_id,
         status=record.status,
+        progress=max(0.0, min(progress, 1.0)),
+        status_message=status_message,
         detected_entities=record.detected_entities,
         warnings=record.warnings,
         error=record.error,
@@ -280,32 +326,112 @@ def _job_worker_loop() -> None:
         except Exception as exc:  # broad except to avoid worker thread death
             LOGGER.exception("Unhandled exception in job worker for job %s: %s", job_id, str(exc))
             _mark_job_failed(job_id, str(exc))
+            _update_job_status(
+                job_id,
+                status_message="FAILED",
+                state="failed",
+                error=str(exc),
+            )
+            _log_debug_block(
+                "WORKER_UNHANDLED_EXCEPTION",
+                job_id=job_id,
+                error=str(exc),
+            )
         finally:
             JOB_QUEUE.task_done()
 
 
 def _process_job(job_id: str) -> None:
+    processing_error: Optional[str] = None
+
     with JOB_LOCK:
         record = JOB_STORE.get(job_id)
         if record is None:
             return
+        input_pdf_path = record.input_pdf_path
         payload = record.input_pdf_bytes
         record.status = "processing"
         record.updated_at = _utc_now()
 
-    if not payload:
-        _mark_job_failed(job_id, "No input payload available for processing.")
-        return
+    _log_debug_block(
+        "JOB_PROCESSING_STARTED",
+        job_id=job_id,
+        input_pdf_path=input_pdf_path,
+        has_inline_payload=bool(payload),
+    )
+
+    _update_job_status(
+        job_id,
+        progress=0.0,
+        status_message="Processing page 0 of 0",
+        state="processing",
+        error=None,
+    )
 
     try:
-        detections, warnings, redacted_pdf_bytes = run_sanitization_pipeline(payload)
+        if not input_pdf_path and not payload:
+            raise RuntimeError("No input payload available for processing.")
+
+        def _page_progress(current_page: int, total_pages: int) -> None:
+            _update_job_status(
+                job_id,
+                progress=(current_page / total_pages) if total_pages > 0 else 0.0,
+                status_message=f"Processing page {current_page} of {total_pages}",
+                state="processing",
+            )
+            _log_debug_block(
+                "PAGE_PROGRESS",
+                job_id=job_id,
+                page=current_page,
+                total_pages=total_pages,
+                progress=f"{current_page}/{total_pages}",
+            )
+
+        detections, warnings, redacted_pdf_bytes = run_sanitization_pipeline(
+            pdf_bytes=payload,
+            pdf_input_path=input_pdf_path,
+            progress_callback=_page_progress,
+        )
+        _log_debug_block(
+            "PIPELINE_RESULT",
+            job_id=job_id,
+            detection_count=len(detections),
+            warning_count=len(warnings),
+            output_bytes=len(redacted_pdf_bytes),
+        )
         output_path = JOB_STORAGE_DIR / f"{job_id}.pdf"
         output_path.write_bytes(redacted_pdf_bytes)
 
         serialized_entities = serialize_detections(detections)
         _mark_job_completed(job_id, serialized_entities, warnings, str(output_path))
+        _update_job_status(
+            job_id,
+            progress=1.0,
+            status_message="Completed",
+            state="completed",
+            error=None,
+        )
+        _log_debug_block(
+            "JOB_COMPLETED",
+            job_id=job_id,
+            output_pdf_path=str(output_path),
+        )
     except Exception as exc:
-        _mark_job_failed(job_id, str(exc))
+        processing_error = str(exc)
+        _mark_job_failed(job_id, processing_error)
+    finally:
+        if processing_error is not None:
+            _update_job_status(
+                job_id,
+                status_message="FAILED",
+                state="failed",
+                error=processing_error,
+            )
+            _log_debug_block(
+                "JOB_FAILED",
+                job_id=job_id,
+                error=processing_error,
+            )
 
 
 def _mark_job_completed(
@@ -324,6 +450,8 @@ def _mark_job_completed(
         record.warnings = warnings
         record.error = None
         record.output_pdf_path = output_pdf_path
+        _delete_file_quietly(record.input_pdf_path)
+        record.input_pdf_path = None
         record.input_pdf_bytes = None
 
 
@@ -335,6 +463,8 @@ def _mark_job_failed(job_id: str, error: str) -> None:
         record.status = "failed"
         record.updated_at = _utc_now()
         record.error = error
+        _delete_file_quietly(record.input_pdf_path)
+        record.input_pdf_path = None
         record.input_pdf_bytes = None
 
 
@@ -344,6 +474,68 @@ def _get_job_or_404(job_id: str) -> JobRecord:
         if record is None:
             raise HTTPException(status_code=404, detail=f"Job {job_id} was not found.")
         return record
+
+
+def _debug_safe_text(value: Any, max_chars: int = 240) -> str:
+    compact = re.sub(r"\s+", " ", str(value)).strip()
+    if len(compact) <= max_chars:
+        return compact
+    return f"{compact[:max_chars]}..."
+
+
+def _log_debug_block(title: str, **details: Any) -> None:
+    if not DEBUG_BLOCKS_ENABLED:
+        return
+
+    lines = [f"[DEBUG] ===== {title} ====="]
+    for key, value in details.items():
+        lines.append(f"[DEBUG] {key}: {_debug_safe_text(value)}")
+    lines.append("[DEBUG] =====================")
+    LOGGER.info("\n%s", "\n".join(lines))
+
+
+def _update_job_status(
+    job_id: str,
+    *,
+    progress: Optional[float] = None,
+    status_message: Optional[str] = None,
+    state: Optional[JobStatus] = None,
+    error: Optional[str] = None,
+) -> None:
+    with JOB_STATUS_LOCK:
+        status_payload = JOB_STATUS.get(job_id, {})
+
+        if progress is not None:
+            status_payload["progress"] = max(0.0, min(float(progress), 1.0))
+
+        if status_message is not None:
+            status_payload["status"] = status_message
+
+        if state is not None:
+            status_payload["state"] = state
+
+        status_payload["error"] = error
+        status_payload["updated_at"] = _utc_now().isoformat()
+        JOB_STATUS[job_id] = status_payload
+
+
+def _read_job_status(job_id: str) -> Dict[str, Any]:
+    with JOB_STATUS_LOCK:
+        return dict(JOB_STATUS.get(job_id, {}))
+
+
+def _delete_file_quietly(file_path: Optional[str]) -> None:
+    if not file_path:
+        return
+
+    candidate = Path(file_path)
+    if not candidate.exists():
+        return
+
+    try:
+        candidate.unlink()
+    except OSError:
+        LOGGER.warning("Failed to delete file: %s", file_path)
 
 
 def _cleanup_expired_jobs() -> None:
@@ -357,6 +549,7 @@ def _cleanup_expired_jobs() -> None:
 
         for job_id in stale_job_ids:
             stale = JOB_STORE.pop(job_id)
+            _delete_file_quietly(stale.input_pdf_path)
             if stale.output_pdf_path:
                 stale_path = Path(stale.output_pdf_path)
                 if stale_path.exists():
@@ -365,29 +558,192 @@ def _cleanup_expired_jobs() -> None:
                     except OSError:
                         LOGGER.warning("Failed to delete stale output file: %s", stale.output_pdf_path)
 
+            with JOB_STATUS_LOCK:
+                JOB_STATUS.pop(job_id, None)
 
-def run_sanitization_pipeline(pdf_bytes: bytes) -> Tuple[List[Detection], List[str], bytes]:
-    words, word_coordinate_map, phrase_coordinate_map = extract_words_with_coordinates(pdf_bytes)
-    if not words:
-        raise RuntimeError("No text could be extracted from the PDF.")
 
-    LOGGER.info(
-        "OCR extraction complete: %s words, %s unique words, %s phrase lines",
-        len(words),
-        len(word_coordinate_map),
-        len(phrase_coordinate_map),
+def get_text_chunks(
+    text: str,
+    chunk_size: int = 2000,
+    overlap: int = 200,
+) -> List[Dict[str, Any]]:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than zero.")
+
+    if overlap < 0 or overlap >= chunk_size:
+        raise ValueError("overlap must be >= 0 and smaller than chunk_size.")
+
+    normalized_text = text or ""
+    if not normalized_text:
+        return []
+
+    chunks: List[Dict[str, Any]] = []
+    cursor = 0
+    text_length = len(normalized_text)
+
+    while cursor < text_length:
+        end_index = min(text_length, cursor + chunk_size)
+        chunks.append(
+            {
+                "chunk_text": normalized_text[cursor:end_index],
+                "global_offset": cursor,
+            }
+        )
+
+        if end_index >= text_length:
+            break
+
+        cursor = max(cursor + 1, end_index - overlap)
+
+    return chunks
+
+
+def _open_pdf_document(
+    pdf_bytes: Optional[bytes],
+    pdf_input_path: Optional[str],
+) -> fitz.Document:
+    if pdf_input_path:
+        return fitz.open(pdf_input_path)
+
+    if pdf_bytes:
+        return fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    raise RuntimeError("No PDF payload available for sanitization.")
+
+
+def _shift_char_map_offsets(
+    char_map: Sequence[Tuple[int, int, BoundingBox]],
+    global_offset: int,
+) -> List[Tuple[int, int, BoundingBox]]:
+    return [
+        (start_char + global_offset, end_char + global_offset, bbox)
+        for start_char, end_char, bbox in char_map
+    ]
+
+
+def _should_run_llm_for_page(
+    page_text: str,
+    presidio_detections: Sequence[Detection],
+    llm_pages_processed: int,
+    llm_max_pages_per_job: int,
+    llm_min_page_chars: int,
+    llm_skip_when_presidio_count: int,
+) -> bool:
+    if llm_max_pages_per_job > 0 and llm_pages_processed >= llm_max_pages_per_job:
+        return False
+
+    if len(page_text.strip()) < llm_min_page_chars:
+        return False
+
+    if len(presidio_detections) >= llm_skip_when_presidio_count:
+        return False
+
+    return True
+
+
+def run_sanitization_pipeline(
+    pdf_bytes: Optional[bytes] = None,
+    *,
+    pdf_input_path: Optional[str] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> Tuple[List[Detection], List[str], bytes]:
+    all_detections: List[Detection] = []
+    warnings: List[str] = []
+    document_char_offset = 0
+    llm_pages_processed = 0
+    llm_max_pages_per_job = max(0, int(os.getenv("LLM_MAX_PAGES_PER_JOB", "10")))
+    llm_min_page_chars = max(0, int(os.getenv("LLM_MIN_PAGE_CHARS", "120")))
+    llm_skip_when_presidio_count = max(1, int(os.getenv("LLM_SKIP_WHEN_PRESIDIO_COUNT", "2")))
+
+    with _open_pdf_document(pdf_bytes=pdf_bytes, pdf_input_path=pdf_input_path) as document:
+        total_pages = document.page_count
+        if total_pages <= 0:
+            raise RuntimeError("Uploaded PDF has no pages.")
+
+        _log_debug_block(
+            "PIPELINE_STARTED",
+            total_pages=total_pages,
+            source="file" if pdf_input_path else "memory",
+        )
+
+        for page_number in range(total_pages):
+            page = document[page_number]
+            page_words = extract_page_words(page, page_number)
+
+            page_detections: List[Detection] = []
+            page_text = ""
+            if page_words:
+                page_text, page_char_map_local, page_word_spans_local = build_character_bbox_map(page_words)
+                if page_text.strip():
+                    page_char_map_absolute = _shift_char_map_offsets(page_char_map_local, document_char_offset)
+                    presidio_detections = run_presidio_triage(
+                        page_text,
+                        page_char_map_absolute,
+                        chunk_size=2000,
+                        overlap=200,
+                        base_global_offset=document_char_offset,
+                    )
+                    if _should_run_llm_for_page(
+                        page_text,
+                        presidio_detections,
+                        llm_pages_processed,
+                        llm_max_pages_per_job,
+                        llm_min_page_chars,
+                        llm_skip_when_presidio_count,
+                    ):
+                        llm_detections, llm_warnings = run_llm_context_triage(
+                            page_text,
+                            page_char_map_local,
+                            page_word_spans_local,
+                        )
+                        llm_pages_processed += 1
+                    else:
+                        llm_detections, llm_warnings = [], []
+                    warnings.extend(llm_warnings)
+                    page_detections = deduplicate_entities(presidio_detections + llm_detections)
+
+            page_boxes = [
+                box
+                for detection in page_detections
+                for box in detection.boxes
+                if box.page_number == page_number
+            ]
+
+            for box in deduplicate_boxes(page_boxes):
+                rect = fitz.Rect(box.x0, box.y0, box.x1, box.y1)
+                if rect.is_empty or rect.is_infinite:
+                    continue
+                page.add_redact_annot(quad=rect, fill=(0, 0, 0))
+
+            # Apply exactly once per page to keep incremental memory usage bounded.
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+
+            _log_debug_block(
+                "PAGE_ANALYZED",
+                page=page_number + 1,
+                total_pages=total_pages,
+                words=len(page_words),
+                detections=len(page_detections),
+                cumulative_detections=len(all_detections) + len(page_detections),
+            )
+
+            all_detections.extend(page_detections)
+            document_char_offset += len(page_text) + 1
+
+            if progress_callback is not None:
+                progress_callback(page_number + 1, total_pages)
+
+        redacted_pdf_bytes = document.tobytes(garbage=4, deflate=True, clean=True)
+
+    deduplicated = deduplicate_entities(all_detections)
+    unique_warnings = list(dict.fromkeys(warnings))
+    _log_debug_block(
+        "PIPELINE_FINISHED",
+        raw_detection_count=len(all_detections),
+        deduplicated_detection_count=len(deduplicated),
+        warning_count=len(unique_warnings),
     )
-
-    canonical_text, char_map, word_spans = build_character_bbox_map(words)
-    if not canonical_text.strip():
-        raise RuntimeError("Extracted text is empty after OCR processing.")
-
-    presidio_detections = run_presidio_triage(canonical_text, char_map)
-    llm_detections, llm_warnings = run_llm_context_triage(canonical_text, char_map, word_spans)
-    all_detections = deduplicate_detections(presidio_detections + llm_detections)
-
-    redacted_pdf_bytes = apply_secure_redactions(pdf_bytes, all_detections)
-    return all_detections, llm_warnings, redacted_pdf_bytes
+    return deduplicated, unique_warnings, redacted_pdf_bytes
 
 
 def _validate_pdf_upload(file: UploadFile, payload: bytes) -> None:
@@ -406,59 +762,78 @@ def _validate_pdf_upload(file: UploadFile, payload: bytes) -> None:
 def run_presidio_triage(
     canonical_text: str,
     char_map: Sequence[Tuple[int, int, BoundingBox]],
+    *,
+    chunk_size: int = 2000,
+    overlap: int = 200,
+    base_global_offset: int = 0,
 ) -> List[Detection]:
     if not canonical_text.strip():
         return []
 
     analyzer = _get_analyzer()
     target_entities = _resolve_target_pii_entities(analyzer)
-    analyzable_text, offset_map = _prepare_text_for_presidio(canonical_text)
-    if not analyzable_text.strip():
-        return []
-
-    results = analyzer.analyze(
-        text=analyzable_text,
-        entities=target_entities,
-        language="en",
-    )
-
+    text_chunks = get_text_chunks(canonical_text, chunk_size=chunk_size, overlap=overlap)
     detections: List[Detection] = []
-    for result in sorted(results, key=lambda item: (item.start, item.end)):
-        if result.end <= result.start:
+    for chunk in text_chunks:
+        chunk_text = str(chunk.get("chunk_text") or "")
+        if not chunk_text.strip():
             continue
 
-        confidence = float(result.score or 0.0)
-        if confidence < MIN_ENTITY_CONFIDENCE:
+        chunk_offset_raw = chunk.get("global_offset", 0)
+        try:
+            chunk_offset = int(chunk_offset_raw)
+        except (TypeError, ValueError):
+            chunk_offset = 0
+
+        chunk_global_offset = base_global_offset + chunk_offset
+        analyzable_text, offset_map = _prepare_text_for_presidio(chunk_text)
+        if not analyzable_text.strip():
             continue
 
-        remapped_offsets = _remap_offsets_to_canonical(
-            result.start,
-            result.end,
-            offset_map,
-            len(canonical_text),
+        results = analyzer.analyze(
+            text=analyzable_text,
+            entities=target_entities,
+            language="en",
         )
-        if remapped_offsets is None:
-            continue
 
-        canonical_start, canonical_end = remapped_offsets
-        entity_text = canonical_text[canonical_start:canonical_end].strip()
-        if not entity_text:
-            continue
+        for result in sorted(results, key=lambda item: (item.start, item.end)):
+            if result.end <= result.start:
+                continue
 
-        boxes = get_bboxes_for_offsets(canonical_start, canonical_end, char_map)
-        if not boxes:
-            continue
+            confidence = float(result.score or 0.0)
+            if confidence < MIN_ENTITY_CONFIDENCE:
+                continue
 
-        entity_type = _reclassify_entity_type(entity_text, result.entity_type)
-        detections.append(
-            Detection(
-                entity_text=entity_text,
-                entity_type=entity_type,
-                confidence_score=confidence,
-                source="Presidio",
-                boxes=boxes,
+            remapped_offsets = _remap_offsets_to_canonical(
+                result.start,
+                result.end,
+                offset_map,
+                len(chunk_text),
             )
-        )
+            if remapped_offsets is None:
+                continue
+
+            chunk_start, chunk_end = remapped_offsets
+            entity_text = chunk_text[chunk_start:chunk_end].strip()
+            if not entity_text:
+                continue
+
+            absolute_start = chunk_global_offset + chunk_start
+            absolute_end = chunk_global_offset + chunk_end
+            boxes = get_bboxes_for_offsets(absolute_start, absolute_end, char_map)
+            if not boxes:
+                continue
+
+            entity_type = _reclassify_entity_type(entity_text, result.entity_type)
+            detections.append(
+                Detection(
+                    entity_text=entity_text,
+                    entity_type=entity_type,
+                    confidence_score=confidence,
+                    source="Presidio",
+                    boxes=boxes,
+                )
+            )
 
     return detections
 
@@ -481,6 +856,7 @@ def run_llm_context_triage(
 
     model = os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL)
     api_base = os.getenv("OPENROUTER_API_BASE", DEFAULT_OPENROUTER_API_BASE)
+    llm_max_output_tokens = max(300, min(1800, int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "700"))))
     text_slice = canonical_text[:LLM_TEXT_CHAR_LIMIT]
 
     raw_content = ""
@@ -506,7 +882,7 @@ def run_llm_context_triage(
                     previous_response=raw_content,
                 ),
                 temperature=0.0,
-                max_tokens=450,
+                max_tokens=llm_max_output_tokens,
             )
             raw_content = _read_completion_content(response_json)
         except Exception as exc:  # broad except to guarantee fallback behavior
@@ -531,16 +907,15 @@ def run_llm_context_triage(
         if LLM_RETRY_PREVIEW_CHARS > 0:
             preview = preview[:LLM_RETRY_PREVIEW_CHARS]
 
-        if preview:
-            warnings.append(
-                "LLM response did not contain a strict JSON array of quote-category-confidence objects "
-                f"after {LLM_PARSE_MAX_RETRIES} attempts. Last response preview: {preview}"
-            )
-        else:
-            warnings.append(
-                "LLM response did not contain a strict JSON array of quote-category-confidence objects "
-                f"after {LLM_PARSE_MAX_RETRIES} attempts."
-            )
+        _log_debug_block(
+            "LLM_PARSE_FAILURE",
+            attempts=LLM_PARSE_MAX_RETRIES,
+            response_preview=preview or "<empty>",
+        )
+        warnings.append(
+            "LLM returned non-JSON output after retries for at least one chunk. "
+            "That chunk was skipped and processing continued."
+        )
         return [], warnings
 
     detections: List[Detection] = []
@@ -572,8 +947,10 @@ def run_llm_context_triage(
             )
 
     if not detections:
-        warnings.append(
-            "LLM returned quotes, but fuzzy matching did not localize any quote at >= 92% similarity."
+        _log_debug_block(
+            "LLM_LOCALIZATION_MISS",
+            quote_candidates=len(candidates),
+            threshold=FUZZY_MATCH_THRESHOLD,
         )
 
     return detections, warnings
@@ -603,14 +980,16 @@ def find_fuzzy_spans(
     if not normalized_quote or not word_spans:
         return []
 
-    token_count = max(1, len(quote.split()))
+    token_count = max(1, len(normalized_quote.split()))
     window_sizes = sorted(
         {
-            max(1, token_count - 2),
+            max(1, token_count - 3),
             max(1, token_count - 1),
             token_count,
             token_count + 1,
             token_count + 2,
+            token_count + 3,
+            token_count + 4,
         }
     )
 
@@ -636,23 +1015,50 @@ def find_fuzzy_spans(
             similarity = max(
                 float(fuzz.ratio(normalized_quote, normalized_candidate)),
                 float(fuzz.token_sort_ratio(normalized_quote, normalized_candidate)),
+                float(fuzz.token_set_ratio(normalized_quote, normalized_candidate)),
+                float(fuzz.partial_ratio(normalized_quote, normalized_candidate)),
             )
-            if similarity < threshold:
-                continue
+            # Strongly reward exact containment after normalization (common with extra context words).
+            if normalized_quote in normalized_candidate or normalized_candidate in normalized_quote:
+                similarity = max(similarity, 98.0)
 
             candidates.append((similarity, left.start_char, right.end_char))
 
-    selected: List[Tuple[float, int, int]] = []
-    for similarity, start_char, end_char in sorted(candidates, key=lambda item: (-item[0], item[1], item[2])):
-        overlaps = any(
-            not (end_char <= chosen_start or start_char >= chosen_end)
-            for _similarity, chosen_start, chosen_end in selected
-        )
-        if overlaps:
-            continue
-        selected.append((similarity, start_char, end_char))
+    def _select_non_overlapping(min_similarity: float) -> List[Tuple[float, int, int]]:
+        selected: List[Tuple[float, int, int]] = []
+        for similarity, start_char, end_char in sorted(candidates, key=lambda item: (-item[0], item[1], item[2])):
+            if similarity < min_similarity:
+                continue
+
+            overlaps = any(
+                not (end_char <= chosen_start or start_char >= chosen_end)
+                for _similarity, chosen_start, chosen_end in selected
+            )
+            if overlaps:
+                continue
+
+            selected.append((similarity, start_char, end_char))
+
+        return selected
+
+    selected = _select_non_overlapping(float(threshold))
+    if not selected:
+        relaxed_threshold = _adaptive_fuzzy_threshold(normalized_quote, threshold)
+        if relaxed_threshold < threshold:
+            selected = _select_non_overlapping(float(relaxed_threshold))
 
     return [(start_char, end_char, similarity) for similarity, start_char, end_char in selected]
+
+
+def _adaptive_fuzzy_threshold(normalized_quote: str, base_threshold: int) -> int:
+    token_count = max(1, len(normalized_quote.split()))
+    char_count = len(normalized_quote)
+
+    if token_count >= 6 or char_count >= 45:
+        return max(80, base_threshold - 10)
+    if token_count >= 4 or char_count >= 28:
+        return max(84, base_threshold - 8)
+    return max(88, base_threshold - 4)
 
 
 def apply_secure_redactions(pdf_bytes: bytes, detections: Sequence[Detection]) -> bytes:
@@ -685,41 +1091,72 @@ def apply_secure_redactions(pdf_bytes: bytes, detections: Sequence[Detection]) -
         document.close()
 
 
-def deduplicate_detections(detections: Sequence[Detection]) -> List[Detection]:
-    deduplicated: Dict[Tuple[str, str], Detection] = {}
+def deduplicate_entities(detected_entities: Sequence[Detection]) -> List[Detection]:
+    winners_by_box: Dict[Tuple[int, float, float, float, float], Tuple[Detection, BoundingBox]] = {}
 
-    for detection in detections:
+    for detection in detected_entities:
         confidence = float(detection.confidence_score)
         if confidence < MIN_ENTITY_CONFIDENCE:
             continue
 
-        normalized_text = re.sub(r"\s+", " ", detection.entity_text).strip().lower()
+        for box in deduplicate_boxes(detection.boxes):
+            key = (
+                box.page_number,
+                round(box.x0, 2),
+                round(box.y0, 2),
+                round(box.x1, 2),
+                round(box.y1, 2),
+            )
+            existing = winners_by_box.get(key)
+            if existing is None:
+                winners_by_box[key] = (detection, box)
+                continue
+
+            existing_detection, _existing_box = existing
+            existing_confidence = float(existing_detection.confidence_score)
+            should_replace = confidence > existing_confidence
+            if confidence == existing_confidence and detection.source == "Presidio" and existing_detection.source != "Presidio":
+                should_replace = True
+
+            if should_replace:
+                winners_by_box[key] = (detection, box)
+
+    deduplicated: Dict[Tuple[str, str, str, float], Detection] = {}
+    for detection, box in winners_by_box.values():
+        normalized_text = re.sub(r"\s+", " ", detection.entity_text).strip()
         if not normalized_text:
             continue
 
-        key = (normalized_text, detection.entity_type)
-        if key not in deduplicated:
-            deduplicated[key] = Detection(
-                entity_text=detection.entity_text.strip(),
+        aggregate_key = (
+            normalized_text.lower(),
+            detection.entity_type,
+            detection.source,
+            round(float(detection.confidence_score), 6),
+        )
+        aggregate = deduplicated.get(aggregate_key)
+        if aggregate is None:
+            aggregate = Detection(
+                entity_text=normalized_text,
                 entity_type=detection.entity_type,
-                confidence_score=confidence,
+                confidence_score=float(detection.confidence_score),
                 source=detection.source,
-                boxes=deduplicate_boxes(detection.boxes),
+                boxes=[],
             )
-            continue
+            deduplicated[aggregate_key] = aggregate
 
-        existing = deduplicated[key]
-        existing.boxes = deduplicate_boxes(existing.boxes + detection.boxes)
-        if confidence > existing.confidence_score or (
-            confidence == existing.confidence_score and detection.source == "Presidio"
-        ):
-            existing.confidence_score = confidence
-            existing.source = detection.source
+        aggregate.boxes.append(box)
+
+    for aggregate in deduplicated.values():
+        aggregate.boxes = deduplicate_boxes(aggregate.boxes)
 
     return sorted(
         deduplicated.values(),
         key=lambda item: (item.entity_type, item.entity_text.lower()),
     )
+
+
+def deduplicate_detections(detections: Sequence[Detection]) -> List[Detection]:
+    return deduplicate_entities(detections)
 
 
 def serialize_detections(detections: Sequence[Detection]) -> List[DetectedEntity]:
@@ -755,14 +1192,16 @@ def _build_llm_messages(
     system_prompt = (
         "You extract personally identifiable and sensitive information from documents.\n"
         "Output contract:\n"
-        "1) Return a JSON array as the top-level value.\n"
+        "1) Return a JSON array as the top-level value, no wrapper object.\n"
         "2) Each array item must be an object with exactly: quote, category, confidence.\n"
         "3) quote must be verbatim text from input.\n"
         "4) category must be a concise label (prefer UPPER_SNAKE_CASE) chosen by you.\n"
         "5) category is open-ended; do not limit yourself to any fixed list.\n"
         "6) confidence must be numeric in range 0 to 1.\n"
         "7) Do not return markdown, prose, code fences, or wrapper objects.\n"
-        "8) If nothing is found, return []."
+        "8) First output character must be '[' and last character must be ']'.\n"
+        "9) If nothing is found, return [].\n"
+        "10) Never include analysis, explanation, or preface text."
     )
 
     user_prompt = f"""
@@ -924,8 +1363,16 @@ def _strip_markdown_code_fence(raw_content: str) -> str:
     return stripped.strip()
 
 
+def _normalize_json_like_text(raw_content: str) -> str:
+    normalized = str(raw_content or "")
+    normalized = normalized.replace("\u201c", '"').replace("\u201d", '"')
+    normalized = normalized.replace("\u2018", "'").replace("\u2019", "'")
+    normalized = re.sub(r",(\s*[}\]])", r"\1", normalized)
+    return normalized
+
+
 def _loads_json_maybe_nested(raw_content: str) -> Optional[Any]:
-    candidate = raw_content.strip()
+    candidate = _normalize_json_like_text(raw_content).strip()
     if not candidate:
         return None
 
@@ -933,7 +1380,10 @@ def _loads_json_maybe_nested(raw_content: str) -> Optional[Any]:
         try:
             parsed = json.loads(candidate)
         except json.JSONDecodeError:
-            return None
+            try:
+                parsed = ast.literal_eval(candidate)
+            except (ValueError, SyntaxError):
+                return None
 
         if isinstance(parsed, str):
             candidate = parsed.strip()
@@ -942,6 +1392,53 @@ def _loads_json_maybe_nested(raw_content: str) -> Optional[Any]:
         return parsed
 
     return None
+
+
+def _extract_balanced_json_segments(raw_content: str, open_char: str, close_char: str) -> List[str]:
+    segments: List[str] = []
+    if not raw_content:
+        return segments
+
+    in_string = False
+    quote_char = ""
+    escape_next = False
+    depth = 0
+    start_index: Optional[int] = None
+
+    for index, char in enumerate(raw_content):
+        if escape_next:
+            escape_next = False
+            continue
+
+        if in_string and char == "\\":
+            escape_next = True
+            continue
+
+        if char in {'"', "'"}:
+            if not in_string:
+                in_string = True
+                quote_char = char
+            elif char == quote_char:
+                in_string = False
+                quote_char = ""
+            continue
+
+        if in_string:
+            continue
+
+        if char == open_char:
+            if depth == 0:
+                start_index = index
+            depth += 1
+            continue
+
+        if char == close_char and depth > 0:
+            depth -= 1
+            if depth == 0 and start_index is not None:
+                segments.append(raw_content[start_index : index + 1])
+                start_index = None
+
+    return segments
 
 
 def _extract_items_from_llm_payload(payload: Any) -> Optional[List[Any]]:
@@ -966,35 +1463,154 @@ def _extract_items_from_llm_payload(payload: Any) -> Optional[List[Any]]:
     return None
 
 
-def _parse_llm_quote_candidates(raw_content: str) -> Tuple[List[LLMQuoteCandidate], bool]:
+def _extract_llm_objects_from_text(raw_content: str) -> List[Any]:
+    objects: List[Any] = []
+    for object_blob in _extract_balanced_json_segments(raw_content, "{", "}"):
+        parsed = _loads_json_maybe_nested(object_blob)
+        if isinstance(parsed, dict) and any(key in parsed for key in ("quote", "text", "value", "entity")):
+            objects.append(parsed)
+    return objects
+
+
+def _extract_llm_plaintext_items(raw_content: str) -> List[Any]:
     if not raw_content:
-        return [], False
+        return []
 
-    payload: Optional[Any] = None
-    primary_text = raw_content.strip()
-    fenced_text = _strip_markdown_code_fence(primary_text)
+    text = _normalize_json_like_text(_strip_markdown_code_fence(raw_content))
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    items: List[Any] = []
 
-    for candidate_text in (primary_text, fenced_text):
-        if not candidate_text:
+    for line in lines:
+        compact_line = re.sub(r"^\s*(?:[-*\u2022]+|\d+[\.)])\s*", "", line).strip()
+        if not compact_line:
             continue
-        payload = _loads_json_maybe_nested(candidate_text)
-        if payload is not None:
-            break
 
-    if payload is None:
-        array_match = re.search(r"\[[\s\S]*\]", raw_content)
-        if array_match:
-            payload = _loads_json_maybe_nested(array_match.group(0))
+        table_item = _parse_llm_markdown_table_row(compact_line)
+        if table_item is not None:
+            items.append(table_item)
+            continue
 
-    if payload is None:
-        object_match = re.search(r"\{[\s\S]*\}", raw_content)
-        if object_match:
-            payload = _loads_json_maybe_nested(object_match.group(0))
+        keyed_item = _parse_llm_keyed_line(compact_line)
+        if keyed_item is not None:
+            items.append(keyed_item)
+            continue
 
-    items = _extract_items_from_llm_payload(payload)
-    if items is None:
-        return [], False
+        quoted_item = _parse_llm_quoted_line(compact_line)
+        if quoted_item is not None:
+            items.append(quoted_item)
 
+    return items
+
+
+def _parse_llm_markdown_table_row(line: str) -> Optional[Dict[str, Any]]:
+    if "|" not in line:
+        return None
+
+    cells = [cell.strip() for cell in line.strip("|").split("|")]
+    if len(cells) < 3:
+        return None
+
+    lower_cells = [cell.lower() for cell in cells[:3]]
+    if lower_cells[0] in {"quote", "text", "entity"}:
+        return None
+    if re.fullmatch(r"[-: ]+", cells[0]):
+        return None
+
+    quote = cells[0].strip("`\"'")
+    category = cells[1].strip("`\"'")
+    confidence = cells[2].strip("`\"'")
+    if not quote:
+        return None
+
+    return {
+        "quote": quote,
+        "category": category,
+        "confidence": confidence or 0.85,
+    }
+
+
+def _parse_llm_keyed_line(line: str) -> Optional[Dict[str, Any]]:
+    keyed_token_pattern = re.compile(
+        r"(?i)\b(quote|text|entity|category|type|label|confidence|score)\b\s*[:=]"
+    )
+    matches = list(keyed_token_pattern.finditer(line))
+    if len(matches) < 2:
+        return None
+
+    values: Dict[str, str] = {}
+    for index, match in enumerate(matches):
+        key = match.group(1).lower()
+        value_start = match.end()
+        value_end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
+        value = line[value_start:value_end].strip(" \t,;|-")
+        if value:
+            values[key] = value.strip("`\"'")
+
+    quote = values.get("quote") or values.get("text") or values.get("entity")
+    if not quote:
+        return None
+
+    category = values.get("category") or values.get("type") or values.get("label") or ""
+    confidence = values.get("confidence") or values.get("score") or 0.85
+    return {
+        "quote": quote,
+        "category": category,
+        "confidence": confidence,
+    }
+
+
+def _parse_llm_quoted_line(line: str) -> Optional[Dict[str, Any]]:
+    match = re.search(r"[\"'](?P<quote>[^\"']+)[\"']\s*(?P<tail>.*)$", line)
+    if not match:
+        return None
+
+    quote = (match.group("quote") or "").strip()
+    tail = (match.group("tail") or "").strip()
+
+    confidence_match = re.search(r"(\d+(?:\.\d+)?%?)", tail)
+    confidence = confidence_match.group(1) if confidence_match else 0.85
+
+    category = tail
+    if confidence_match:
+        category = tail[: confidence_match.start()]
+
+    category = re.sub(r"(?i)^category\s*[:=]\s*", "", category)
+    category = category.strip(" \t-_|(),:")
+    if not quote:
+        return None
+
+    return {
+        "quote": quote,
+        "category": category,
+        "confidence": confidence,
+    }
+
+
+def _parse_confidence_value(confidence_raw: Any, default: float = 0.85) -> float:
+    if isinstance(confidence_raw, (int, float)):
+        value = float(confidence_raw)
+    else:
+        raw_text = str(confidence_raw or "").strip()
+        if not raw_text:
+            value = default
+        else:
+            percent_match = re.search(r"(-?\d+(?:\.\d+)?)\s*%", raw_text)
+            if percent_match:
+                value = _safe_float(percent_match.group(1), default=default) / 100.0
+            else:
+                numeric_match = re.search(r"-?\d+(?:\.\d+)?", raw_text)
+                if numeric_match:
+                    value = _safe_float(numeric_match.group(0), default=default)
+                else:
+                    value = default
+
+    if value > 1:
+        value = value / 100.0
+
+    return max(0.0, min(1.0, value))
+
+
+def _build_llm_quote_candidates_from_items(items: Sequence[Any]) -> List[LLMQuoteCandidate]:
     deduped: Dict[Tuple[str, str], LLMQuoteCandidate] = {}
     for item in items:
         quote = ""
@@ -1019,10 +1635,7 @@ def _parse_llm_quote_candidates(raw_content: str) -> Tuple[List[LLMQuoteCandidat
         if not quote:
             continue
 
-        confidence_value = _safe_float(confidence_raw, default=0.85)
-        if confidence_value > 1:
-            confidence_value = confidence_value / 100.0
-        confidence_value = max(0.0, min(1.0, confidence_value))
+        confidence_value = _parse_confidence_value(confidence_raw, default=0.85)
 
         normalized_quote = re.sub(r"\s+", " ", quote).strip().lower()
         normalized_category = re.sub(r"\s+", " ", category).strip().lower()
@@ -1035,7 +1648,46 @@ def _parse_llm_quote_candidates(raw_content: str) -> Tuple[List[LLMQuoteCandidat
                 confidence=confidence_value,
             )
 
-    return list(deduped.values()), True
+    return list(deduped.values())
+
+
+def _parse_llm_quote_candidates(raw_content: str) -> Tuple[List[LLMQuoteCandidate], bool]:
+    if not raw_content:
+        return [], False
+
+    payload: Optional[Any] = None
+    primary_text = raw_content.strip()
+    fenced_text = _strip_markdown_code_fence(primary_text)
+
+    candidate_texts: List[str] = [primary_text, fenced_text]
+    candidate_texts.extend(_extract_balanced_json_segments(primary_text, "[", "]"))
+    candidate_texts.extend(_extract_balanced_json_segments(primary_text, "{", "}"))
+
+    for candidate_text in candidate_texts:
+        if not candidate_text:
+            continue
+        payload = _loads_json_maybe_nested(candidate_text)
+        if payload is None:
+            continue
+
+        items = _extract_items_from_llm_payload(payload)
+        if items is None:
+            continue
+
+        candidates = _build_llm_quote_candidates_from_items(items)
+        return candidates, True
+
+    fallback_items = _extract_llm_objects_from_text(primary_text)
+    if fallback_items:
+        candidates = _build_llm_quote_candidates_from_items(fallback_items)
+        return candidates, True
+
+    plaintext_items = _extract_llm_plaintext_items(primary_text)
+    if plaintext_items:
+        candidates = _build_llm_quote_candidates_from_items(plaintext_items)
+        return candidates, True
+
+    return [], False
 
 
 def _normalize_llm_category(raw_category: str, quote: str) -> str:
@@ -1279,8 +1931,11 @@ def _reclassify_entity_type(entity_text: str, original_type: str) -> str:
 
 
 def _normalize_for_fuzzy(text: str) -> str:
-    normalized = re.sub(r"\s+", " ", text.upper()).strip()
+    normalized = str(text or "").upper()
     normalized = re.sub(r"(?<=\d)[OQ](?=\d|$)", "0", normalized)
+    normalized = re.sub(r"(?<=\d)[IL](?=\d|$)", "1", normalized)
+    normalized = re.sub(r"[^A-Z0-9$]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
 
 
