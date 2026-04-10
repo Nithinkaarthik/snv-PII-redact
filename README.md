@@ -10,6 +10,7 @@ Robust document sanitization pipeline with a decoupled architecture:
 - Hybrid extraction per page:
 	- Uses native PDF text (`PyMuPDF`) when meaningful text exists.
 	- Falls back to OCR (`pytesseract`) for scanned/low-text pages.
+	- Detects table-like layouts from OCR geometry and preserves row/column structure.
 - Character offset bridge:
 	- Builds a running character-to-bounding-box map during extraction.
 	- Maps Presidio offsets back to exact PDF geometry.
@@ -87,6 +88,21 @@ Useful tuning knobs:
 - `MIN_ENTITY_CONFIDENCE` (default `0.7`)
 - `FUZZY_MATCH_THRESHOLD` (default `92`)
 - `LLM_REQUEST_TIMEOUT_SECONDS` (default `60`)
+- `TABLE_PARSER_ENABLED` (default `1`)
+- `TABLE_MIN_ROWS` (default `2`)
+- `TABLE_MIN_COLS` (default `2`)
+- `TABLE_MIN_CONFIDENCE` (default `0.58`)
+- `TABLE_ROW_Y_TOLERANCE_PT` (default `4.0`)
+- `TABLE_COLUMN_GAP_MIN_PT` (default `14.0`)
+- `TABLE_MAX_COLUMN_DRIFT_PT` (default `14.0`)
+- `TABLE_CONTINUATION_MAX_Y_GAP_MULT` (default `1.9`)
+- `REDACTION_BOX_TIGHTEN_ENABLED` (default `1`)
+- `REDACTION_VERTICAL_INSET_RATIO` (default `0.18`)
+- `REDACTION_VERTICAL_INSET_MAX_PT` (default `2.2`)
+- `REDACTION_HORIZONTAL_INSET_RATIO` (default `0.01`)
+- `REDACTION_HORIZONTAL_INSET_MAX_PT` (default `1.0`)
+- `REDACTION_DYNAMIC_INSET_ENABLED` (default `1`)
+- `REDACTION_MIN_SAFE_GAP_PT` (default `0.3`)
 
 ## Run Backend
 

@@ -11,12 +11,14 @@ import pytesseract
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 try:
-    from backend.config import LOGGER, NATIVE_TEXT_MIN_ALNUM
-    from backend.models import BoundingBox, OCRWord
+    from backend.config import LOGGER, NATIVE_TEXT_MIN_ALNUM, TABLE_PARSER_ENABLED
+    from backend.models import BoundingBox, LineHeightCache, OCRWord, TableRegion
+    from backend.table_detection import detect_table_regions
     from backend.text_mapping import build_coordinate_maps
 except ImportError:
-    from config import LOGGER, NATIVE_TEXT_MIN_ALNUM
-    from models import BoundingBox, OCRWord
+    from config import LOGGER, NATIVE_TEXT_MIN_ALNUM, TABLE_PARSER_ENABLED
+    from models import BoundingBox, LineHeightCache, OCRWord, TableRegion
+    from table_detection import detect_table_regions
     from text_mapping import build_coordinate_maps
 
 
@@ -93,6 +95,26 @@ def extract_page_words(page: fitz.Page, page_number: int) -> List[OCRWord]:
 
     _debug("OCR_FALLBACK_EMPTY page=%s returning_native_words=%s", page_number + 1, len(native_words))
     return native_words
+
+
+def extract_page_words_with_tables(
+    page: fitz.Page,
+    page_number: int,
+) -> Tuple[List[OCRWord], List[TableRegion], LineHeightCache]:
+    page_words = extract_page_words(page, page_number)
+    line_height_cache = LineHeightCache.from_words(page_words)
+    if not TABLE_PARSER_ENABLED or not page_words:
+        return page_words, [], line_height_cache
+
+    table_regions = detect_table_regions(page_words)
+    _debug(
+        "PAGE_TABLE_PARSE page=%s tables=%s cells=%s lines=%s",
+        page_number + 1,
+        len(table_regions),
+        sum(len(region.cells) for region in table_regions),
+        len(line_height_cache.lines_by_page.get(page_number, ())),
+    )
+    return page_words, table_regions, line_height_cache
 
 
 def _is_page_text_meaningful(page_words: Sequence[OCRWord]) -> bool:
