@@ -17,6 +17,7 @@ import requests
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from rapidfuzz import fuzz
 from presidio_analyzer import AnalyzerEngine
@@ -91,6 +92,10 @@ WORKER_THREAD: Optional[Thread] = None
 JOB_QUEUE: Queue[str] = Queue(maxsize=MAX_JOB_QUEUE_SIZE)
 JOB_STORE: Dict[str, "JobRecord"] = {}
 JOB_LOCK = Lock()
+BACKEND_DIR = Path(__file__).resolve().parent
+REPO_ROOT = BACKEND_DIR.parent
+FRONTEND_DIR = REPO_ROOT / "frontend"
+FRONTEND_ENTRYPOINT = FRONTEND_DIR / "index.html"
 
 
 class BBoxModel(BaseModel):
@@ -164,11 +169,21 @@ app.add_middleware(
     allow_credentials=False,
 )
 
+if FRONTEND_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIR)), name="frontend-assets")
+
 
 @app.on_event("startup")
 def startup_event() -> None:
     JOB_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     _start_worker_if_needed()
+
+
+@app.get("/", include_in_schema=False)
+def serve_frontend() -> FileResponse:
+    if not FRONTEND_ENTRYPOINT.exists():
+        raise HTTPException(status_code=404, detail="Frontend entrypoint was not found.")
+    return FileResponse(path=str(FRONTEND_ENTRYPOINT))
 
 
 @app.get("/health")

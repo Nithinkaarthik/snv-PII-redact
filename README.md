@@ -3,7 +3,7 @@
 Robust document sanitization pipeline with a decoupled architecture:
 
 - FastAPI backend for OCR, PII/context extraction, and forensic PDF redaction.
-- Streamlit frontend for upload, queue monitoring, entity inspection, and sanitized download.
+- Tailwind + vanilla JavaScript frontend for upload, queue monitoring, entity inspection, and sanitized download.
 
 ## Highlights
 
@@ -31,7 +31,8 @@ Robust document sanitization pipeline with a decoupled architecture:
 ## Project Layout
 
 - backend/main.py: FastAPI API, queue worker, sanitization pipeline.
-- frontend/app.py: Streamlit X-Ray dashboard.
+- frontend/index.html: Dark technical dashboard shell and component structure.
+- frontend/app.js: Frontend state machine, API integration, polling, and rendering.
 - docs/presidio-char-index-mapping.md: mapping math notes.
 
 ## Setup
@@ -103,10 +104,10 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 ## Run Frontend
 
-From repository root:
+The frontend is served directly by FastAPI. Start the backend, then open the app in your browser:
 
 ```bash
-streamlit run frontend/app.py
+http://localhost:8000
 ```
 
 ## API Contract
@@ -123,7 +124,7 @@ streamlit run frontend/app.py
 	"status_url": "/api/v1/jobs/<job_id>",
 	"download_url": "/api/v1/download/<job_id>"
 }
-```
+
 
 ### GET `/api/v1/jobs/{job_id}`
 
