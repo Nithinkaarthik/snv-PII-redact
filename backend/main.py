@@ -150,6 +150,8 @@ LLM_TEXT_CHAR_LIMIT = int(os.getenv("LLM_TEXT_CHAR_LIMIT", "20000"))
 DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-safeguard-20b")
 DEFAULT_OPENROUTER_API_BASE = os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
 LLM_REQUEST_TIMEOUT_SECONDS = int(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "60"))
+LLM_PARSE_MAX_RETRIES = max(1, int(os.getenv("LLM_PARSE_MAX_RETRIES", "3")))
+LLM_RETRY_PREVIEW_CHARS = int(os.getenv("LLM_RETRY_PREVIEW_CHARS", "220"))
 
 DEFAULT_SPACY_MODEL = os.getenv("PRESIDIO_SPACY_MODEL", "en_core_web_trf")
 MIN_ENTITY_CONFIDENCE = float(os.getenv("MIN_ENTITY_CONFIDENCE", "0.7"))
@@ -913,26 +915,59 @@ def run_llm_context_triage(
     api_base = os.getenv("OPENROUTER_API_BASE", DEFAULT_OPENROUTER_API_BASE)
     text_slice = canonical_text[:LLM_TEXT_CHAR_LIMIT]
 
-    try:
-        response_json = _call_openrouter_chat_completion(
-            api_base=api_base,
-            api_key=api_key,
-            model=model,
-            messages=_build_llm_messages(text_slice),
-            temperature=0.0,
-            max_tokens=450,
-        )
-        raw_content = _read_completion_content(response_json)
-    except Exception as exc:  # broad except to guarantee fallback behavior
-        warnings.append(
-            "LLM step failed and pipeline continued with Presidio-only detections: "
-            f"{str(exc)}"
-        )
-        return [], warnings
+    raw_content = ""
+    candidates: List[LLMQuoteCandidate] = []
 
-    candidates = _parse_llm_quote_candidates(raw_content)
+    for attempt in range(1, LLM_PARSE_MAX_RETRIES + 1):
+        retry_feedback = ""
+        if attempt > 1:
+            retry_feedback = (
+                "Previous response was invalid. Return ONLY a top-level JSON array of "
+                "objects with quote and confidence."
+            )
+
+        try:
+            response_json = _call_openrouter_chat_completion(
+                api_base=api_base,
+                api_key=api_key,
+                model=model,
+                messages=_build_llm_messages(
+                    text_slice,
+                    retry_feedback=retry_feedback,
+                    previous_response=raw_content,
+                ),
+                temperature=0.0,
+                max_tokens=450,
+            )
+            raw_content = _read_completion_content(response_json)
+        except Exception as exc:  # broad except to guarantee fallback behavior
+            if attempt >= LLM_PARSE_MAX_RETRIES:
+                warnings.append(
+                    "LLM step failed after retries and pipeline continued with Presidio-only detections: "
+                    f"{str(exc)}"
+                )
+                return [], warnings
+            continue
+
+        candidates = _parse_llm_quote_candidates(raw_content)
+        if candidates:
+            break
+
     if not candidates:
-        warnings.append("LLM response did not contain a strict JSON array of quote-confidence objects.")
+        preview = re.sub(r"\s+", " ", raw_content).strip()
+        if LLM_RETRY_PREVIEW_CHARS > 0:
+            preview = preview[:LLM_RETRY_PREVIEW_CHARS]
+
+        if preview:
+            warnings.append(
+                "LLM response did not contain a strict JSON array of quote-confidence objects "
+                f"after {LLM_PARSE_MAX_RETRIES} attempts. Last response preview: {preview}"
+            )
+        else:
+            warnings.append(
+                "LLM response did not contain a strict JSON array of quote-confidence objects "
+                f"after {LLM_PARSE_MAX_RETRIES} attempts."
+            )
         return [], warnings
 
     detections: List[Detection] = []
@@ -1170,11 +1205,20 @@ def _merge_boxes(boxes: Sequence[BoundingBox]) -> BoundingBox:
     )
 
 
-def _build_llm_messages(document_text: str) -> List[Dict[str, str]]:
+def _build_llm_messages(
+    document_text: str,
+    retry_feedback: str = "",
+    previous_response: str = "",
+) -> List[Dict[str, str]]:
     system_prompt = (
-        "You extract confidentiality entities from legal and corporate documents. "
-        "Return ONLY a strict JSON array of objects with keys quote and confidence. "
-        "confidence must be a decimal from 0 to 1. quote must be verbatim from input."
+        "You extract confidentiality entities from legal and corporate documents.\n"
+        "Output contract:\n"
+        "1) Return a JSON array as the top-level value.\n"
+        "2) Each array item must be an object with exactly: quote, confidence.\n"
+        "3) quote must be verbatim text from input.\n"
+        "4) confidence must be numeric in range 0 to 1.\n"
+        "5) Do not return markdown, prose, code fences, or wrapper objects.\n"
+        "6) If nothing is found, return []."
     )
 
     user_prompt = f"""
@@ -1183,42 +1227,22 @@ Targets:
 2) Financial penalty amounts
 3) Jurisdiction states
 
-Example 1
-Input:
-This Service Agreement is between Acme Holdings LLC and Beta Logistics Inc. A breach triggers liquidated damages of $250,000. Governing law is Texas.
-Output:
-[
-  {{"quote":"Acme Holdings LLC","confidence":0.97}},
-  {{"quote":"Beta Logistics Inc.","confidence":0.96}},
-  {{"quote":"$250,000","confidence":0.98}},
-  {{"quote":"Texas","confidence":0.95}}
-]
+Return only the JSON array.
 
-Example 2
-Input:
-The parties Northwind Energy Ltd. and Sunrise Manufacturing Co. agree that late delivery incurs a penalty of $1,500,000 under California law.
-Output:
-[
-  {{"quote":"Northwind Energy Ltd.","confidence":0.96}},
-  {{"quote":"Sunrise Manufacturing Co.","confidence":0.96}},
-  {{"quote":"$1,500,000","confidence":0.98}},
-  {{"quote":"California","confidence":0.95}}
-]
-
-Example 3
-Input:
-This contract binds Apex Insurance Group with Riverview Clinics. Non-compliance results in damages of $75,000 and disputes are resolved in New York.
-Output:
-[
-  {{"quote":"Apex Insurance Group","confidence":0.95}},
-  {{"quote":"Riverview Clinics","confidence":0.95}},
-  {{"quote":"$75,000","confidence":0.98}},
-  {{"quote":"New York","confidence":0.95}}
-]
-
-Now process the following text and return only the strict JSON array of objects:
+Document:
 {document_text}
 """.strip()
+
+    if retry_feedback:
+        user_prompt += f"\n\nRetry reason: {retry_feedback}"
+
+    if previous_response:
+        compact_prev = re.sub(r"\s+", " ", previous_response).strip()[:1200]
+        user_prompt += (
+            "\n\nPrevious invalid output (for correction):\n"
+            f"{compact_prev}\n"
+            "Re-emit as valid JSON array only."
+        )
 
     return [
         {"role": "system", "content": system_prompt},
