@@ -44,6 +44,12 @@ def _clean_env_value(raw_value: str) -> str:
     return value.strip()
 
 
+def _env_flag(name: str, default: str = "0") -> bool:
+    raw_value = os.getenv(name, default)
+    normalized = _clean_env_value(raw_value).strip().lower()
+    return normalized not in {"", "0", "false", "no", "off"}
+
+
 def _normalize_openrouter_api_key(raw_key: str) -> str:
     key = _clean_env_value(raw_key)
     if key.lower().startswith("bearer "):
@@ -144,6 +150,23 @@ LLM_RETRY_PREVIEW_CHARS = int(os.getenv("LLM_RETRY_PREVIEW_CHARS", "220"))
 DEFAULT_SPACY_MODEL = os.getenv("PRESIDIO_SPACY_MODEL", "en_core_web_trf")
 MIN_ENTITY_CONFIDENCE = float(os.getenv("MIN_ENTITY_CONFIDENCE", "0.7"))
 FUZZY_MATCH_THRESHOLD = int(os.getenv("FUZZY_MATCH_THRESHOLD", "92"))
+
+TABLE_PARSER_ENABLED = _env_flag("TABLE_PARSER_ENABLED", "1")
+TABLE_MIN_ROWS = max(2, int(os.getenv("TABLE_MIN_ROWS", "2")))
+TABLE_MIN_COLS = max(2, int(os.getenv("TABLE_MIN_COLS", "2")))
+TABLE_MIN_CONFIDENCE = max(0.0, min(1.0, float(os.getenv("TABLE_MIN_CONFIDENCE", "0.58"))))
+TABLE_ROW_Y_TOLERANCE_PT = max(1.0, float(os.getenv("TABLE_ROW_Y_TOLERANCE_PT", "4.0")))
+TABLE_COLUMN_GAP_MIN_PT = max(2.0, float(os.getenv("TABLE_COLUMN_GAP_MIN_PT", "14.0")))
+TABLE_MAX_COLUMN_DRIFT_PT = max(1.0, float(os.getenv("TABLE_MAX_COLUMN_DRIFT_PT", "14.0")))
+TABLE_CONTINUATION_MAX_Y_GAP_MULT = max(1.0, float(os.getenv("TABLE_CONTINUATION_MAX_Y_GAP_MULT", "1.9")))
+
+REDACTION_BOX_TIGHTEN_ENABLED = _env_flag("REDACTION_BOX_TIGHTEN_ENABLED", "1")
+REDACTION_VERTICAL_INSET_RATIO = max(0.0, min(0.45, float(os.getenv("REDACTION_VERTICAL_INSET_RATIO", "0.18"))))
+REDACTION_VERTICAL_INSET_MAX_PT = max(0.0, float(os.getenv("REDACTION_VERTICAL_INSET_MAX_PT", "2.2")))
+REDACTION_HORIZONTAL_INSET_RATIO = max(0.0, min(0.35, float(os.getenv("REDACTION_HORIZONTAL_INSET_RATIO", "0.0"))))
+REDACTION_HORIZONTAL_INSET_MAX_PT = max(0.0, float(os.getenv("REDACTION_HORIZONTAL_INSET_MAX_PT", "0.0")))
+REDACTION_DYNAMIC_INSET_ENABLED = _env_flag("REDACTION_DYNAMIC_INSET_ENABLED", "1")
+REDACTION_MIN_SAFE_GAP_PT = max(0.0, float(os.getenv("REDACTION_MIN_SAFE_GAP_PT", "0.3")))
 
 IGNORE_JSON_KEYS: Set[str] = {"id", "filename", "metadata.item", "input.ke"}
 BUSINESS_KEYWORD_PATTERN = re.compile(

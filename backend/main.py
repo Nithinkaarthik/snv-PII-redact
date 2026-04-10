@@ -43,7 +43,15 @@ try:
         MAX_JOB_QUEUE_SIZE,
         MIN_ENTITY_CONFIDENCE,
         NATIVE_TEXT_MIN_ALNUM,
+        REDACTION_BOX_TIGHTEN_ENABLED,
+        REDACTION_DYNAMIC_INSET_ENABLED,
+        REDACTION_HORIZONTAL_INSET_MAX_PT,
+        REDACTION_HORIZONTAL_INSET_RATIO,
+        REDACTION_MIN_SAFE_GAP_PT,
+        REDACTION_VERTICAL_INSET_MAX_PT,
+        REDACTION_VERTICAL_INSET_RATIO,
         TARGET_PII_ENTITIES,
+        TABLE_PARSER_ENABLED,
         US_STATE_ABBREVIATIONS,
         US_STATE_NAMES,
         _clean_env_value,
@@ -69,7 +77,15 @@ except ImportError:
         MAX_JOB_QUEUE_SIZE,
         MIN_ENTITY_CONFIDENCE,
         NATIVE_TEXT_MIN_ALNUM,
+        REDACTION_BOX_TIGHTEN_ENABLED,
+        REDACTION_DYNAMIC_INSET_ENABLED,
+        REDACTION_HORIZONTAL_INSET_MAX_PT,
+        REDACTION_HORIZONTAL_INSET_RATIO,
+        REDACTION_MIN_SAFE_GAP_PT,
+        REDACTION_VERTICAL_INSET_MAX_PT,
+        REDACTION_VERTICAL_INSET_RATIO,
         TARGET_PII_ENTITIES,
+        TABLE_PARSER_ENABLED,
         US_STATE_ABBREVIATIONS,
         US_STATE_NAMES,
         _clean_env_value,
@@ -78,12 +94,12 @@ except ImportError:
     )
 
 try:
-    from backend.models import BoundingBox, OCRWord, WordSpan
-    from backend.ocr import extract_page_words
+    from backend.models import BoundingBox, LineHeightCache, OCRWord, TableRegion, WordSpan
+    from backend.ocr import extract_page_words_with_tables
     from backend.text_mapping import build_character_bbox_map, deduplicate_boxes, get_bboxes_for_offsets
 except ImportError:
-    from models import BoundingBox, OCRWord, WordSpan
-    from ocr import extract_page_words
+    from models import BoundingBox, LineHeightCache, OCRWord, TableRegion, WordSpan
+    from ocr import extract_page_words_with_tables
     from text_mapping import build_character_bbox_map, deduplicate_boxes, get_bboxes_for_offsets
 
 JobStatus = Literal["queued", "processing", "completed", "failed"]
@@ -101,6 +117,11 @@ BACKEND_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BACKEND_DIR.parent
 FRONTEND_DIR = REPO_ROOT / "frontend"
 FRONTEND_ENTRYPOINT = FRONTEND_DIR / "index.html"
+_CONTEXTUAL_IDENTIFIER_PATTERN = re.compile(
+    r"\b(?:customer|client|member|user|policy|account|receipt|transaction|order)\s*"
+    r"(?:id|identifier|number|no\.?|#)\b",
+    flags=re.IGNORECASE,
+)
 
 
 class BBoxModel(BaseModel):
@@ -636,6 +657,82 @@ def _shift_char_map_offsets(
     ]
 
 
+def _tighten_box_for_redaction(
+    box: BoundingBox,
+    *,
+    line_cache: Optional[LineHeightCache] = None,
+) -> BoundingBox:
+    if not REDACTION_BOX_TIGHTEN_ENABLED:
+        return box
+
+    width = max(0.0, box.x1 - box.x0)
+    height = max(0.0, box.y1 - box.y0)
+    if width <= 0 or height <= 0:
+        return box
+
+    x_inset = min(REDACTION_HORIZONTAL_INSET_MAX_PT, width * REDACTION_HORIZONTAL_INSET_RATIO)
+    y_inset = min(REDACTION_VERTICAL_INSET_MAX_PT, height * REDACTION_VERTICAL_INSET_RATIO)
+
+    if REDACTION_DYNAMIC_INSET_ENABLED and line_cache is not None:
+        safe_vertical_cap = line_cache.compute_safe_vertical_inset(
+            box,
+            safety_margin_pt=REDACTION_MIN_SAFE_GAP_PT,
+        )
+        y_inset = min(y_inset, safe_vertical_cap)
+
+    min_visible_width = max(0.8, width * 0.32)
+    min_visible_height = max(0.8, height * 0.40)
+
+    max_x_inset = max(0.0, (width - min_visible_width) / 2.0)
+    max_y_inset = max(0.0, (height - min_visible_height) / 2.0)
+
+    x_inset = min(max(0.0, x_inset), max_x_inset)
+    y_inset = min(max(0.0, y_inset), max_y_inset)
+
+    tightened = BoundingBox(
+        page_number=box.page_number,
+        x0=box.x0 + x_inset,
+        y0=box.y0 + y_inset,
+        x1=box.x1 - x_inset,
+        y1=box.y1 - y_inset,
+    )
+
+    if tightened.x1 <= tightened.x0 or tightened.y1 <= tightened.y0:
+        return box
+
+    return tightened
+
+
+def _tighten_detections_for_page(
+    detections: Sequence[Detection],
+    *,
+    line_cache: Optional[LineHeightCache] = None,
+) -> List[Detection]:
+    tightened_detections: List[Detection] = []
+
+    for detection in detections:
+        tightened_boxes = deduplicate_boxes(
+            [
+                _tighten_box_for_redaction(box, line_cache=line_cache)
+                for box in detection.boxes
+            ]
+        )
+        if not tightened_boxes:
+            continue
+
+        tightened_detections.append(
+            Detection(
+                entity_text=detection.entity_text,
+                entity_type=detection.entity_type,
+                confidence_score=detection.confidence_score,
+                source=detection.source,
+                boxes=tightened_boxes,
+            )
+        )
+
+    return tightened_detections
+
+
 def _should_run_llm_for_page(
     page_text: str,
     presidio_detections: Sequence[Detection],
@@ -644,13 +741,16 @@ def _should_run_llm_for_page(
     llm_min_page_chars: int,
     llm_skip_when_presidio_count: int,
 ) -> bool:
+    if not page_text.strip():
+        return False
+
     if llm_max_pages_per_job > 0 and llm_pages_processed >= llm_max_pages_per_job:
         return False
 
-    if len(page_text.strip()) < llm_min_page_chars:
+    if llm_min_page_chars > 0 and len(page_text.strip()) < llm_min_page_chars:
         return False
 
-    if len(presidio_detections) >= llm_skip_when_presidio_count:
+    if llm_skip_when_presidio_count > 0 and len(presidio_detections) >= llm_skip_when_presidio_count:
         return False
 
     return True
@@ -666,9 +766,9 @@ def run_sanitization_pipeline(
     warnings: List[str] = []
     document_char_offset = 0
     llm_pages_processed = 0
-    llm_max_pages_per_job = max(0, int(os.getenv("LLM_MAX_PAGES_PER_JOB", "10")))
-    llm_min_page_chars = max(0, int(os.getenv("LLM_MIN_PAGE_CHARS", "120")))
-    llm_skip_when_presidio_count = max(1, int(os.getenv("LLM_SKIP_WHEN_PRESIDIO_COUNT", "2")))
+    llm_max_pages_per_job = max(0, int(os.getenv("LLM_MAX_PAGES_PER_JOB", "0")))
+    llm_min_page_chars = max(0, int(os.getenv("LLM_MIN_PAGE_CHARS", "0")))
+    llm_skip_when_presidio_count = max(0, int(os.getenv("LLM_SKIP_WHEN_PRESIDIO_COUNT", "0")))
 
     with _open_pdf_document(pdf_bytes=pdf_bytes, pdf_input_path=pdf_input_path) as document:
         total_pages = document.page_count
@@ -683,12 +783,15 @@ def run_sanitization_pipeline(
 
         for page_number in range(total_pages):
             page = document[page_number]
-            page_words = extract_page_words(page, page_number)
+            page_words, page_tables, page_line_cache = extract_page_words_with_tables(page, page_number)
 
             page_detections: List[Detection] = []
             page_text = ""
             if page_words:
-                page_text, page_char_map_local, page_word_spans_local = build_character_bbox_map(page_words)
+                page_text, page_char_map_local, page_word_spans_local = build_character_bbox_map(
+                    page_words,
+                    table_regions=page_tables,
+                )
                 if page_text.strip():
                     page_char_map_absolute = _shift_char_map_offsets(page_char_map_local, document_char_offset)
                     presidio_detections = run_presidio_triage(
@@ -710,12 +813,17 @@ def run_sanitization_pipeline(
                             page_text,
                             page_char_map_local,
                             page_word_spans_local,
+                            table_regions=page_tables,
                         )
                         llm_pages_processed += 1
                     else:
                         llm_detections, llm_warnings = [], []
                     warnings.extend(llm_warnings)
                     page_detections = deduplicate_entities(presidio_detections + llm_detections)
+                    page_detections = _tighten_detections_for_page(
+                        page_detections,
+                        line_cache=page_line_cache,
+                    )
 
             page_boxes = [
                 box
@@ -738,6 +846,7 @@ def run_sanitization_pipeline(
                 page=page_number + 1,
                 total_pages=total_pages,
                 words=len(page_words),
+                tables=len(page_tables),
                 detections=len(page_detections),
                 cumulative_detections=len(all_detections) + len(page_detections),
             )
@@ -815,10 +924,6 @@ def run_presidio_triage(
             if result.end <= result.start:
                 continue
 
-            confidence = float(result.score or 0.0)
-            if confidence < MIN_ENTITY_CONFIDENCE:
-                continue
-
             remapped_offsets = _remap_offsets_to_canonical(
                 result.start,
                 result.end,
@@ -833,13 +938,27 @@ def run_presidio_triage(
             if not entity_text:
                 continue
 
+            confidence = float(result.score or 0.0)
+            entity_type = _reclassify_entity_type(entity_text, result.entity_type)
+            promoted = _maybe_promote_contextual_identifier(
+                entity_text=entity_text,
+                entity_type=entity_type,
+                confidence=confidence,
+                chunk_text=chunk_text,
+                start_char=chunk_start,
+                end_char=chunk_end,
+            )
+            if promoted is not None:
+                entity_type, confidence = promoted
+
+            if confidence < MIN_ENTITY_CONFIDENCE:
+                continue
+
             absolute_start = chunk_global_offset + chunk_start
             absolute_end = chunk_global_offset + chunk_end
             boxes = get_bboxes_for_offsets(absolute_start, absolute_end, char_map)
             if not boxes:
                 continue
-
-            entity_type = _reclassify_entity_type(entity_text, result.entity_type)
             detections.append(
                 Detection(
                     entity_text=entity_text,
@@ -857,6 +976,7 @@ def run_llm_context_triage(
     canonical_text: str,
     char_map: Sequence[Tuple[int, int, BoundingBox]],
     word_spans: Sequence[WordSpan],
+    table_regions: Optional[Sequence[TableRegion]] = None,
 ) -> Tuple[List[Detection], List[str]]:
     warnings: List[str] = []
 
@@ -873,6 +993,7 @@ def run_llm_context_triage(
     api_base = os.getenv("OPENROUTER_API_BASE", DEFAULT_OPENROUTER_API_BASE)
     llm_max_output_tokens = max(300, min(1800, int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "700"))))
     text_slice = canonical_text[:LLM_TEXT_CHAR_LIMIT]
+    has_table_context = TABLE_PARSER_ENABLED and bool(table_regions)
 
     raw_content = ""
     candidates: List[LLMQuoteCandidate] = []
@@ -895,6 +1016,7 @@ def run_llm_context_triage(
                     text_slice,
                     retry_feedback=retry_feedback,
                     previous_response=raw_content,
+                    has_table_context=has_table_context,
                 ),
                 temperature=0.0,
                 max_tokens=llm_max_output_tokens,
@@ -995,18 +1117,14 @@ def find_fuzzy_spans(
     if not normalized_quote or not word_spans:
         return []
 
-    token_count = max(1, len(normalized_quote.split()))
-    window_sizes = sorted(
-        {
-            max(1, token_count - 3),
-            max(1, token_count - 1),
-            token_count,
-            token_count + 1,
-            token_count + 2,
-            token_count + 3,
-            token_count + 4,
-        }
-    )
+    # Calculate token lengths for both raw and normalized versions
+    raw_token_count = max(1, len(quote.split()))
+    norm_token_count = max(1, len(normalized_quote.split()))
+    
+    # Establish a window sizes range covering the min tokens and max tokens + padding
+    min_window = max(1, min(raw_token_count, norm_token_count) - 3)
+    max_window = max(raw_token_count, norm_token_count) + 5
+    window_sizes = list(range(min_window, max_window + 1))
 
     candidates: List[Tuple[float, int, int]] = []
     total_words = len(word_spans)
@@ -1085,7 +1203,8 @@ def apply_secure_redactions(pdf_bytes: bytes, detections: Sequence[Detection]) -
 
     for detection in detections:
         for box in detection.boxes:
-            boxes_by_page.setdefault(box.page_number, []).append(box)
+            tightened = _tighten_box_for_redaction(box)
+            boxes_by_page.setdefault(tightened.page_number, []).append(tightened)
 
     try:
         for page_number, page_boxes in boxes_by_page.items():
@@ -1203,6 +1322,7 @@ def _build_llm_messages(
     document_text: str,
     retry_feedback: str = "",
     previous_response: str = "",
+    has_table_context: bool = False,
 ) -> List[Dict[str, str]]:
     system_prompt = (
         "You extract personally identifiable and sensitive information from documents.\n"
@@ -1218,6 +1338,13 @@ def _build_llm_messages(
         "9) If nothing is found, return [].\n"
         "10) Never include analysis, explanation, or preface text."
     )
+
+    if has_table_context:
+        system_prompt += (
+            "\n11) Input may include [TABLE] blocks where each row uses ' | ' as column separators."
+            "\n12) Treat each cell value as independently detectable sensitive text."
+            "\n13) Preserve exact quote text from cells, including wrapped values."
+        )
 
     user_prompt = f"""
 Detect any personally identifiable or sensitive information in the document.
@@ -1943,6 +2070,40 @@ def _reclassify_entity_type(entity_text: str, original_type: str) -> str:
     if BUSINESS_KEYWORD_PATTERN.search(entity_text):
         return "ORGANIZATION"
     return original_type
+
+
+def _maybe_promote_contextual_identifier(
+    *,
+    entity_text: str,
+    entity_type: str,
+    confidence: float,
+    chunk_text: str,
+    start_char: int,
+    end_char: int,
+) -> Optional[Tuple[str, float]]:
+    if confidence >= MIN_ENTITY_CONFIDENCE:
+        return None
+        
+    # Promote URLs and Emails automatically since they are highly structured 
+    # but might score low due to weird surrounding OCR text or domains
+    if entity_type in {"URL", "EMAIL_ADDRESS"}:
+        return entity_type, max(confidence, 0.85)
+
+    if entity_type not in {"PHONE_NUMBER", "US_BANK_NUMBER", "US_DRIVER_LICENSE"}:
+        return None
+
+    digits_only = re.sub(r"\D", "", entity_text)
+    if len(digits_only) < 8 or len(digits_only) > 18:
+        return None
+
+    context_start = max(0, start_char - 48)
+    context_end = min(len(chunk_text), end_char + 24)
+    local_context = chunk_text[context_start:context_end]
+    if not _CONTEXTUAL_IDENTIFIER_PATTERN.search(local_context):
+        return None
+
+    boosted_confidence = max(confidence, 0.86)
+    return "CUSTOMER_IDENTIFIER", boosted_confidence
 
 
 def _normalize_for_fuzzy(text: str) -> str:
