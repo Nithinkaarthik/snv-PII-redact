@@ -124,6 +124,20 @@ _CONTEXTUAL_IDENTIFIER_PATTERN = re.compile(
     r"(?:id|identifier|number|no\.?|#)\b",
     flags=re.IGNORECASE,
 )
+_CONTEXTUAL_SHORT_CODE_PATTERN = re.compile(
+    r"\b(?:pin|otp|one[-\s]*time\s*(?:password|pin)|passcode|security\s*code|verification\s*code)\b",
+    flags=re.IGNORECASE,
+)
+_CONTEXTUAL_CUSTOMER_IDENTIFIER_RULE = re.compile(
+    r"\b(?:customer|client|member|user|policy|account|receipt|transaction|order)\s*"
+    r"(?:id|identifier|number|no\.?|#)\s*(?:is|:|=)?\s*([A-Z0-9][A-Z0-9\-]{3,23})\b",
+    flags=re.IGNORECASE,
+)
+_CONTEXTUAL_SECURITY_CODE_RULE = re.compile(
+    r"\b(?:pin|otp|one[-\s]*time\s*(?:password|pin)|passcode|security\s*code|verification\s*code)"
+    r"\s*(?:is|:|=)?\s*(\d{4,8})\b",
+    flags=re.IGNORECASE,
+)
 _ENGINE_SOURCE_ORDER: Tuple[EngineSource, ...] = ("Presidio", "LLM")
 _STRUCTURED_ENTITY_TYPES: Set[str] = {
     "EMAIL_ADDRESS",
@@ -143,6 +157,60 @@ _AMBIGUOUS_TYPE_SOURCE_BONUS: Dict[Tuple[str, EngineSource], float] = {
     ("PERSON", "Presidio"): 0.08,
     ("STREET_ADDRESS", "Presidio"): 0.08,
     ("ORGANIZATION", "LLM"): 0.08,
+}
+_LLM_LOW_SIGNAL_TOKENS: Set[str] = {
+    "a",
+    "an",
+    "and",
+    "any",
+    "are",
+    "as",
+    "at",
+    "be",
+    "been",
+    "being",
+    "but",
+    "by",
+    "dear",
+    "for",
+    "from",
+    "here",
+    "i",
+    "if",
+    "in",
+    "is",
+    "it",
+    "its",
+    "me",
+    "my",
+    "not",
+    "of",
+    "on",
+    "or",
+    "our",
+    "ours",
+    "please",
+    "sincerely",
+    "thank",
+    "thanks",
+    "that",
+    "the",
+    "their",
+    "them",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "to",
+    "us",
+    "was",
+    "we",
+    "were",
+    "with",
+    "you",
+    "your",
+    "yours",
 }
 
 
@@ -846,8 +914,15 @@ def run_sanitization_pipeline(
                         llm_pages_processed += 1
                     else:
                         llm_detections, llm_warnings = [], []
+
+                    contextual_rule_detections = run_contextual_numeric_triage(
+                        page_text,
+                        page_char_map_local,
+                    )
                     warnings.extend(llm_warnings)
-                    page_detections = deduplicate_entities(presidio_detections + llm_detections)
+                    page_detections = deduplicate_entities(
+                        presidio_detections + llm_detections + contextual_rule_detections
+                    )
                     page_detections = _tighten_detections_for_page(
                         page_detections,
                         line_cache=page_line_cache,
@@ -1087,11 +1162,14 @@ def run_llm_context_triage(
 
     detections: List[Detection] = []
     for candidate in candidates:
+        inferred_type = _normalize_llm_category(candidate.category, candidate.quote)
+        if _is_low_signal_llm_quote(candidate.quote, inferred_type):
+            continue
+
         matches = find_fuzzy_spans(candidate.quote, word_spans, threshold=FUZZY_MATCH_THRESHOLD)
         if not matches:
             continue
 
-        inferred_type = _normalize_llm_category(candidate.category, candidate.quote)
         for start_char, end_char, similarity_score in matches:
             fuzzy_conf = max(0.0, min(1.0, similarity_score / 100.0))
             combined_conf = (candidate.confidence + fuzzy_conf) / 2.0
@@ -1103,6 +1181,9 @@ def run_llm_context_triage(
                 continue
 
             localized_text = canonical_text[start_char:end_char].strip() or candidate.quote
+            if _is_low_signal_llm_quote(localized_text, inferred_type):
+                continue
+
             detections.append(
                 Detection(
                     entity_text=localized_text,
@@ -1125,6 +1206,65 @@ def run_llm_context_triage(
     return detections, warnings
 
 
+def run_contextual_numeric_triage(
+    canonical_text: str,
+    char_map: Sequence[Tuple[int, int, BoundingBox]],
+) -> List[Detection]:
+    if not canonical_text.strip() or not char_map:
+        return []
+
+    detections: List[Detection] = []
+    for match in _CONTEXTUAL_CUSTOMER_IDENTIFIER_RULE.finditer(canonical_text):
+        start_char, end_char = match.span(1)
+        entity_text = canonical_text[start_char:end_char].strip()
+        if not entity_text:
+            continue
+
+        digits_only = re.sub(r"\D", "", entity_text)
+        if len(digits_only) < 6 and len(entity_text) < 6:
+            continue
+
+        boxes = get_bboxes_for_offsets(start_char, end_char, char_map)
+        if not boxes:
+            continue
+
+        detections.append(
+            Detection(
+                entity_text=entity_text,
+                entity_type="CUSTOMER_IDENTIFIER",
+                confidence_score=max(MIN_ENTITY_CONFIDENCE, 0.9),
+                source="Presidio",
+                boxes=boxes,
+                supporting_sources=["Presidio"],
+                decision_reason="contextual_numeric_rule",
+            )
+        )
+
+    for match in _CONTEXTUAL_SECURITY_CODE_RULE.finditer(canonical_text):
+        start_char, end_char = match.span(1)
+        entity_text = canonical_text[start_char:end_char].strip()
+        if not entity_text:
+            continue
+
+        boxes = get_bboxes_for_offsets(start_char, end_char, char_map)
+        if not boxes:
+            continue
+
+        detections.append(
+            Detection(
+                entity_text=entity_text,
+                entity_type="SECURITY_CODE",
+                confidence_score=max(MIN_ENTITY_CONFIDENCE, 0.92),
+                source="Presidio",
+                boxes=boxes,
+                supporting_sources=["Presidio"],
+                decision_reason="contextual_short_code_rule",
+            )
+        )
+
+    return detections
+
+
 def classify_llm_quote_type(quote: str) -> str:
     if re.search(r"\$\s?\d[\d,]*(?:\.\d+)?", quote):
         return "FINANCIAL_PENALTY_AMOUNT"
@@ -1138,6 +1278,43 @@ def classify_llm_quote_type(quote: str) -> str:
         return "JURISDICTION_STATE"
 
     return "LEGAL_PARTY_NAME"
+
+
+def _is_low_signal_llm_quote(quote: str, entity_type: str) -> bool:
+    raw_quote = str(quote or "").strip()
+    if not raw_quote:
+        return True
+
+    tokens = re.findall(r"[A-Za-z0-9]+", raw_quote.lower())
+    if not tokens:
+        return True
+
+    has_digit = any(any(char.isdigit() for char in token) for token in tokens)
+    candidate_type = str(entity_type or "").strip().upper()
+
+    if not has_digit and all(token in _LLM_LOW_SIGNAL_TOKENS for token in tokens):
+        return True
+
+    if len(tokens) == 1 and not has_digit:
+        token = tokens[0]
+        if token in _LLM_LOW_SIGNAL_TOKENS:
+            return True
+
+        # Single-token party/name detections are noisy for blurry OCR unless token is acronym-like.
+        if candidate_type in {"LEGAL_PARTY_NAME", "PERSON", "ORGANIZATION"}:
+            compact = re.sub(r"[^A-Za-z0-9]+", "", raw_quote)
+            looks_like_acronym = compact.isupper() and len(compact) >= 2
+            if len(token) <= 3 and not looks_like_acronym:
+                return True
+
+    if not has_digit and candidate_type in {"LEGAL_PARTY_NAME", "PERSON"}:
+        alpha_tokens = [token for token in tokens if token.isalpha()]
+        if len(alpha_tokens) <= 2:
+            lower_count = sum(1 for token in re.findall(r"[A-Za-z]+", raw_quote) if token.islower())
+            if lower_count == len(alpha_tokens):
+                return True
+
+    return False
 
 
 def find_fuzzy_spans(
@@ -2277,16 +2454,21 @@ def _maybe_promote_contextual_identifier(
     if entity_type in {"URL", "EMAIL_ADDRESS"}:
         return entity_type, max(confidence, 0.85)
 
-    if entity_type not in {"PHONE_NUMBER", "US_BANK_NUMBER", "US_DRIVER_LICENSE"}:
-        return None
-
     digits_only = re.sub(r"\D", "", entity_text)
-    if len(digits_only) < 8 or len(digits_only) > 18:
-        return None
-
     context_start = max(0, start_char - 48)
     context_end = min(len(chunk_text), end_char + 24)
     local_context = chunk_text[context_start:context_end]
+
+    if 4 <= len(digits_only) <= 7 and _CONTEXTUAL_SHORT_CODE_PATTERN.search(local_context):
+        boosted_confidence = max(confidence, 0.89)
+        return "SECURITY_CODE", boosted_confidence
+
+    if entity_type not in {"PHONE_NUMBER", "US_BANK_NUMBER", "US_DRIVER_LICENSE"}:
+        return None
+
+    if len(digits_only) < 8 or len(digits_only) > 18:
+        return None
+
     if not _CONTEXTUAL_IDENTIFIER_PATTERN.search(local_context):
         return None
 

@@ -32,6 +32,12 @@ def _debug(message: str, *args: object) -> None:
     LOGGER.info("[DEBUG] " + message, *args)
 
 
+def _env_flag(name: str, default: str = "0") -> bool:
+    raw_value = os.getenv(name, default)
+    normalized = str(raw_value or "").strip().lower()
+    return normalized not in _DEBUG_FALSE_VALUES
+
+
 def extract_words_with_coordinates(
     pdf_bytes: bytes,
 ) -> Tuple[List[OCRWord], Dict[str, List[BoundingBox]], Dict[str, List[BoundingBox]]]:
@@ -158,8 +164,16 @@ def _extract_page_words_tesseract(page: fitz.Page, page_number: int) -> List[OCR
     if base_scale <= 0:
         base_scale = 1.5
 
+    high_accuracy_mode = _env_flag("OCR_HIGH_ACCURACY_MODE", "0")
     adaptive_scale = _resolve_adaptive_ocr_scale(page, base_scale)
+    if high_accuracy_mode:
+        scale_boost = max(1.0, _safe_float(os.getenv("OCR_HIGH_ACCURACY_SCALE_MULT", "1.35"), default=1.35))
+        adaptive_scale = min(2.8, adaptive_scale * scale_boost)
+
     matrix = fitz.Matrix(adaptive_scale, adaptive_scale)
+    full_matrix = page.rotation_matrix * matrix
+    inverse_matrix = ~full_matrix
+
     pixmap = page.get_pixmap(matrix=matrix, alpha=False)
     base_image = Image.open(io.BytesIO(pixmap.tobytes("png")))
 
@@ -167,6 +181,20 @@ def _extract_page_words_tesseract(page: fitz.Page, page_number: int) -> List[OCR
     min_confidence = _safe_float(os.getenv("OCR_MIN_CONFIDENCE", "20"), default=20.0)
     strong_word_threshold = int(_safe_float(os.getenv("OCR_STRONG_WORD_THRESHOLD", "16"), default=16.0))
     strong_avg_conf = _safe_float(os.getenv("OCR_STRONG_AVG_CONF", "46"), default=46.0)
+
+    if high_accuracy_mode:
+        min_confidence = max(
+            2.0,
+            min(min_confidence, _safe_float(os.getenv("OCR_HIGH_ACCURACY_MIN_CONFIDENCE", "10"), default=10.0)),
+        )
+        strong_word_threshold = max(
+            strong_word_threshold,
+            int(_safe_float(os.getenv("OCR_HIGH_ACCURACY_STRONG_WORD_THRESHOLD", "26"), default=26.0)),
+        )
+        strong_avg_conf = max(
+            strong_avg_conf,
+            _safe_float(os.getenv("OCR_HIGH_ACCURACY_STRONG_AVG_CONF", "58"), default=58.0),
+        )
 
     passes = [
         {
@@ -189,12 +217,31 @@ def _extract_page_words_tesseract(page: fitz.Page, page_number: int) -> List[OCR
         },
     ]
 
+    if high_accuracy_mode:
+        passes.extend(
+            [
+                {
+                    "name": "deblur_dense",
+                    "image": _prepare_ocr_variant(base_image, "deblur"),
+                    "config": _replace_or_append_psm(base_config, "6"),
+                    "min_conf": max(4.0, min_confidence - 8.0),
+                },
+                {
+                    "name": "deblur_sparse",
+                    "image": _prepare_ocr_variant(base_image, "deblur"),
+                    "config": _replace_or_append_psm(base_config, "11"),
+                    "min_conf": max(3.0, min_confidence - 10.0),
+                },
+            ]
+        )
+
     _debug(
-        "OCR_RENDER page=%s scale=%.2f base_config=%s min_conf=%.1f",
+        "OCR_RENDER page=%s scale=%.2f base_config=%s min_conf=%.1f high_accuracy=%s",
         page_number + 1,
         adaptive_scale,
         base_config,
         min_confidence,
+        high_accuracy_mode,
     )
 
     best_words: List[OCRWord] = []
@@ -219,8 +266,7 @@ def _extract_page_words_tesseract(page: fitz.Page, page_number: int) -> List[OCR
         words, metrics = _extract_words_from_ocr_data(
             ocr_data=ocr_data,
             page_number=page_number,
-            zoom_x=matrix.a,
-            zoom_y=matrix.d,
+            inverse_matrix=inverse_matrix,
             min_confidence=pass_min_conf,
             line_key_prefix=f"tesseract:{pass_name}",
         )
@@ -256,8 +302,7 @@ def _extract_page_words_tesseract(page: fitz.Page, page_number: int) -> List[OCR
 def _extract_words_from_ocr_data(
     ocr_data: Dict[str, Any],
     page_number: int,
-    zoom_x: float,
-    zoom_y: float,
+    inverse_matrix: fitz.Matrix,
     min_confidence: float,
     line_key_prefix: str,
 ) -> Tuple[List[OCRWord], Dict[str, float]]:
@@ -274,9 +319,6 @@ def _extract_words_from_ocr_data(
     blocks = ocr_data.get("block_num", [])
     paragraphs = ocr_data.get("par_num", [])
     lines = ocr_data.get("line_num", [])
-
-    full_matrix = page.rotation_matrix * matrix
-    inverse_matrix = ~full_matrix
 
     skipped_empty = 0
     skipped_conf = 0
@@ -353,6 +395,12 @@ def _prepare_ocr_variant(image: Image.Image, variant: str) -> Image.Image:
         threshold_value = max(90, min(threshold_value, 220))
         binary = enhanced.point(lambda value: 255 if value > threshold_value else 0, mode="1")
         return binary.convert("L")
+
+    if variant == "deblur":
+        enhanced = ImageOps.autocontrast(gray, cutoff=0)
+        enhanced = ImageEnhance.Sharpness(enhanced).enhance(2.1)
+        enhanced = ImageEnhance.Contrast(enhanced).enhance(1.45)
+        return enhanced.filter(ImageFilter.UnsharpMask(radius=1.1, percent=170, threshold=2))
 
     return gray
 
