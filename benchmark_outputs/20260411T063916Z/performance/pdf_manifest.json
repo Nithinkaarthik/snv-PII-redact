@@ -1,0 +1,212 @@
+[
+  {
+    "filename": "document_0044.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0044.pdf",
+    "size_bytes": 215176,
+    "page_count": 1,
+    "sha256": "3dc12553dcc282ef17f2164284ac1635bff5f8f1fe505fdf72e6d0c433207261"
+  },
+  {
+    "filename": "document_0058.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0058.pdf",
+    "size_bytes": 1469,
+    "page_count": 1,
+    "sha256": "7fead50e8943c0b53f0216d6a020b5cf90a12fb72d2404fdea294515bac259b1"
+  },
+  {
+    "filename": "document_0134.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0134.pdf",
+    "size_bytes": 101472,
+    "page_count": 1,
+    "sha256": "ce6b0564aea6356bbf85167029bf3b3af6a2492c8ecb79baaa6460efad4ce0b3"
+  },
+  {
+    "filename": "document_0155.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0155.pdf",
+    "size_bytes": 107550,
+    "page_count": 1,
+    "sha256": "16bff758c91e6f029c2bfbb6cf0a853989e50382feec587fec298e5f0103b669"
+  },
+  {
+    "filename": "document_0212.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0212.pdf",
+    "size_bytes": 83069,
+    "page_count": 1,
+    "sha256": "dfd2d13d4f24030e077f15b97b149c6fe5f22e37029b9a85fa1b186815a56222"
+  },
+  {
+    "filename": "document_0224.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0224.pdf",
+    "size_bytes": 1824,
+    "page_count": 1,
+    "sha256": "61881a9b0a0fa55da1cc2ae9a31f174befa5141a387412075fcdd7289854cf5d"
+  },
+  {
+    "filename": "document_0278.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0278.pdf",
+    "size_bytes": 192283,
+    "page_count": 1,
+    "sha256": "d7cd80ff64de449aea1562ae68d34e281b8497d816775afbbdf8d02854324cb2"
+  },
+  {
+    "filename": "document_0421.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0421.pdf",
+    "size_bytes": 1537,
+    "page_count": 1,
+    "sha256": "bea1b22b1610c60e50fd151c82a4ff43d846b513c159585566f51e004ff0b658"
+  },
+  {
+    "filename": "document_0432.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0432.pdf",
+    "size_bytes": 82238,
+    "page_count": 1,
+    "sha256": "73b399a242eabe81d02439452a0f48c9a371a712001a369c42019926a959676a"
+  },
+  {
+    "filename": "document_0468.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0468.pdf",
+    "size_bytes": 333818,
+    "page_count": 1,
+    "sha256": "dab628dd3db189b276b2a681ae26b97573a8d50df476745680955014c38c56d1"
+  },
+  {
+    "filename": "document_0506.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0506.pdf",
+    "size_bytes": 80303,
+    "page_count": 1,
+    "sha256": "73a75bbc286edfb6073a17ba75912faf42458033d98bf51b55a11ee0197db240"
+  },
+  {
+    "filename": "document_0509.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0509.pdf",
+    "size_bytes": 129335,
+    "page_count": 1,
+    "sha256": "1ef1c2edc6b65393e695dcdbc925b218c01cc476973d18e3a3b11fe359d81e10"
+  },
+  {
+    "filename": "document_0539.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0539.pdf",
+    "size_bytes": 1349,
+    "page_count": 1,
+    "sha256": "9733b95e1167b8bd771189142736c1039eed4b5254c700d220cd6d5fe382c6ed"
+  },
+  {
+    "filename": "document_0565.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0565.pdf",
+    "size_bytes": 100002,
+    "page_count": 1,
+    "sha256": "de84e2670de88593145cacbc139c1247c0d949ea6fcc9d6dfc09cf1096c4fa19"
+  },
+  {
+    "filename": "document_0569.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0569.pdf",
+    "size_bytes": 86275,
+    "page_count": 1,
+    "sha256": "41fe3ab430f6322128bb7ebd171a12c5870d369de61f05c65296230d09300ead"
+  },
+  {
+    "filename": "document_0619.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0619.pdf",
+    "size_bytes": 59930,
+    "page_count": 1,
+    "sha256": "a6eaa65166d1552d7b1276117324ab0dee426756f1b697f7e311e8dfca44ccf5"
+  },
+  {
+    "filename": "document_0675.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0675.pdf",
+    "size_bytes": 148685,
+    "page_count": 1,
+    "sha256": "c7b3135e5b4a3ace39b8cecfdf617326945ab63053c35f0f75700f1011110006"
+  },
+  {
+    "filename": "document_0713.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0713.pdf",
+    "size_bytes": 67006,
+    "page_count": 1,
+    "sha256": "4e0e6a4c9d6f7855ec1964db5bf75b8aea6df3fc7f57504218f0f871126cf75f"
+  },
+  {
+    "filename": "document_0718.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0718.pdf",
+    "size_bytes": 1476,
+    "page_count": 1,
+    "sha256": "ae8f21670e39b6f69050289b5109ce3207bbb1abef726aac79b2a75268795e10"
+  },
+  {
+    "filename": "document_0836.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0836.pdf",
+    "size_bytes": 1308,
+    "page_count": 1,
+    "sha256": "67c1eff5e971469c2d7c6ebd8cd2fa2339cd3a6fbeea1a18386f4f5e70414893"
+  },
+  {
+    "filename": "document_0859.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0859.pdf",
+    "size_bytes": 60450,
+    "page_count": 1,
+    "sha256": "7b091957057c369d3f4f8152d7c657cb0cc6769a611b3ca58787c8692845521b"
+  },
+  {
+    "filename": "document_0874.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0874.pdf",
+    "size_bytes": 103005,
+    "page_count": 1,
+    "sha256": "730c8e7384d71c631290e94e5a952ef22893ae23e7a083eedd85fdb5f4a1bdeb"
+  },
+  {
+    "filename": "document_0907.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0907.pdf",
+    "size_bytes": 1668,
+    "page_count": 1,
+    "sha256": "0e43980fb6d96b9057120163aa1d64c40341123e6009cf66e5a3ef742f3f799b"
+  },
+  {
+    "filename": "document_0985.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0985.pdf",
+    "size_bytes": 1773,
+    "page_count": 1,
+    "sha256": "36b2ff3f7d9c084a23da8520ce9f8f56b364a56a3da2ad1aabcf9f755bf42e5d"
+  },
+  {
+    "filename": "document_0994.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_0994.pdf",
+    "size_bytes": 1460,
+    "page_count": 1,
+    "sha256": "c08e346576e193c6f1bb5a20054d964215d1f07e053d732d26e43e59e1b049fb"
+  },
+  {
+    "filename": "document_1017.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_1017.pdf",
+    "size_bytes": 1151,
+    "page_count": 1,
+    "sha256": "02b6f1ed23ad9b71312c4a2395a6acb3ac3b2c625ddf721d418f8e2b863af8c7"
+  },
+  {
+    "filename": "document_1026.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_1026.pdf",
+    "size_bytes": 86844,
+    "page_count": 1,
+    "sha256": "9222dba10b1464762c97a218b0aedb0b5ac1a644d70b873773c31110894691b7"
+  },
+  {
+    "filename": "document_1082.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_1082.pdf",
+    "size_bytes": 349134,
+    "page_count": 1,
+    "sha256": "d3da12f53ad29f63b8badd5ce9ec26373264bc93ab93d94c1aac6c1d354941e8"
+  },
+  {
+    "filename": "document_1102.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_1102.pdf",
+    "size_bytes": 90425,
+    "page_count": 1,
+    "sha256": "75a3a1c3864c621650f4a3f67fc35461b4cd310c8ead48ef2e14f58a39373038"
+  },
+  {
+    "filename": "document_1103.pdf",
+    "absolute_path": "E:\\snv-PII-redact\\pdfs\\document_1103.pdf",
+    "size_bytes": 179534,
+    "page_count": 1,
+    "sha256": "f0d7a5f9a968081846b0a8be03efa85142f813711b89b4f536df25d0cc5f6dac"
+  }
+]

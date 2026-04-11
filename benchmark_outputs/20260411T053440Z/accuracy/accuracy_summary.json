@@ -1,0 +1,35 @@
+{
+  "benchmark_type": "accuracy",
+  "dataset_name": "ai4privacy/pii-masking-300k",
+  "split_name": "train",
+  "sample_size": 1,
+  "seed": 42,
+  "language_filter": "English",
+  "include_llm": false,
+  "iou_threshold": 0.5,
+  "row_duration_seconds": {
+    "count": 1,
+    "min": 5.6254026999813505,
+    "max": 5.6254026999813505,
+    "mean": 5.6254026999813505,
+    "median": 5.6254026999813505,
+    "p90": 5.6254026999813505,
+    "p95": 5.6254026999813505
+  },
+  "all_label_metrics": {
+    "tp": 1,
+    "fp": 3,
+    "fn": 6,
+    "precision": 0.25,
+    "recall": 0.14285714285714285,
+    "f1": 0.18181818181818182
+  },
+  "capability_slice_metrics": {
+    "tp": 1,
+    "fp": 2,
+    "fn": 0,
+    "precision": 0.3333333333333333,
+    "recall": 1.0,
+    "f1": 0.5
+  }
+}

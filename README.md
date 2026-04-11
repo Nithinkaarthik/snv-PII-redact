@@ -160,3 +160,78 @@ http://localhost:8000
 ### GET `/api/v1/download/{job_id}`
 
 - Returns the redacted PDF file when job status is `completed`.
+
+## Benchmarking (30 PDFs + 30 Dataset Rows)
+
+The repository now includes benchmark harness scripts under `benchmark/`:
+
+- `benchmark/performance_benchmark.py`:
+	- Runs performance metrics on local PDFs (for example, the 30 files under `pdfs/`).
+	- Captures queue wait, processing latency, total latency, p50/p90/p95, throughput, and failure rate.
+- `benchmark/accuracy_benchmark.py`:
+	- Loads `ai4privacy/pii-masking-300k`, samples English rows deterministically, and computes accuracy metrics.
+	- Reports both:
+		- all-label metrics (strictly includes all dataset labels), and
+		- capability-slice metrics (diagnostic view for labels the current detector targets).
+- `benchmark/run_benchmark.py`:
+	- Runs both tracks in one command and writes a consolidated summary.
+	- Automatically generates `benchmark_report.html` inside each combined run directory.
+- `benchmark/html_report.py`:
+	- Generates an HTML report from existing benchmark artifacts.
+	- Can be used standalone when you already have `combined_summary.json`.
+
+Install dependencies first:
+
+```bash
+pip install -r requirements.txt
+```
+
+### Performance Benchmark (Local 30 PDFs)
+
+```bash
+python -m benchmark.performance_benchmark \
+	--api-base http://127.0.0.1:8000 \
+	--pdf-dir pdfs \
+	--max-pdfs 30 \
+	--poll-interval 2.0 \
+	--output-dir benchmark_outputs/performance
+```
+
+### Accuracy Benchmark (30 AI4Privacy Rows)
+
+```bash
+python -m benchmark.accuracy_benchmark \
+	--dataset ai4privacy/pii-masking-300k \
+	--split train \
+	--sample-size 30 \
+	--seed 42 \
+	--iou-threshold 0.5 \
+	--output-dir benchmark_outputs/accuracy
+```
+
+### Combined Benchmark Run
+
+```bash
+python -m benchmark.run_benchmark \
+	--api-base http://127.0.0.1:8000 \
+	--pdf-dir pdfs \
+	--max-pdfs 30 \
+	--dataset ai4privacy/pii-masking-300k \
+	--dataset-split train \
+	--sample-size 30 \
+	--seed 42 \
+	--iou-threshold 0.5 \
+	--output-root benchmark_outputs
+```
+
+Artifacts are written under `benchmark_outputs/` with JSON and CSV summaries for audit and regression tracking.
+
+### Standalone HTML Report Generation
+
+Use this when a combined run already exists and you want to regenerate the HTML report:
+
+```bash
+python -m benchmark.html_report \
+	--run-dir benchmark_outputs/<RUN_TIMESTAMP> \
+	--output-name benchmark_report.html
+```

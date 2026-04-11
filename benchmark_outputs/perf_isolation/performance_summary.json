@@ -1,0 +1,48 @@
+{
+  "benchmark_type": "performance",
+  "api_base": "http://127.0.0.1:8000",
+  "pdf_dir": "E:\\snv-PII-redact\\pdfs",
+  "requested_pdf_count": 30,
+  "actual_pdf_count": 30,
+  "completed_jobs": 30,
+  "failed_jobs": 0,
+  "failure_rate": 0.0,
+  "throughput_pdfs_per_hour": 1066.7069434137745,
+  "queue_wait_seconds": {
+    "count": 30,
+    "min": 0.708618,
+    "max": 96.631457,
+    "mean": 48.409350966666665,
+    "median": 48.229489,
+    "p90": 87.1202524,
+    "p95": 91.14262654999999
+  },
+  "processing_seconds": {
+    "count": 30,
+    "min": 2.026992,
+    "max": 6.321945,
+    "mean": 3.352247166666666,
+    "median": 3.8514485,
+    "p90": 4.374874400000003,
+    "p95": 6.1684854
+  },
+  "total_seconds": {
+    "count": 30,
+    "min": 7.030563,
+    "max": 100.643424,
+    "mean": 51.76159813333333,
+    "median": 51.3378115,
+    "p90": 89.3479173,
+    "p95": 94.98781249999999
+  },
+  "end_to_end_seconds": {
+    "count": 30,
+    "min": 7.030563,
+    "max": 100.643424,
+    "mean": 51.76159813333333,
+    "median": 51.3378115,
+    "p90": 89.3479173,
+    "p95": 94.98781249999999
+  },
+  "download_outputs": false
+}

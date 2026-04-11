@@ -1,0 +1,19 @@
+[
+  {
+    "job_id": "11f6009a92d947d2a4e4cb8d836cca6f",
+    "filename": "document_0044.pdf",
+    "submitted_at": "2026-04-11T05:34:40.832476+00:00",
+    "processing_started_at": "2026-04-11T05:34:41.219551+00:00",
+    "completed_at": "2026-04-11T05:34:47.249588+00:00",
+    "downloaded_at": null,
+    "final_status": "completed",
+    "progress": 1.0,
+    "detected_entity_count": 6,
+    "warning_count": 0,
+    "error": null,
+    "queue_wait_sec": 0.387075,
+    "processing_sec": 6.030037,
+    "total_sec": 6.417112,
+    "end_to_end_sec": 6.417112
+  }
+]

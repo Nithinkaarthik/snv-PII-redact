@@ -1,0 +1,87 @@
+{
+  "run_dir": "E:\\snv-PII-redact\\benchmark_outputs\\20260411T053440Z",
+  "performance": {
+    "benchmark_type": "performance",
+    "api_base": "http://127.0.0.1:8000",
+    "pdf_dir": "E:\\snv-PII-redact\\pdfs",
+    "requested_pdf_count": 1,
+    "actual_pdf_count": 1,
+    "completed_jobs": 1,
+    "failed_jobs": 0,
+    "failure_rate": 0.0,
+    "throughput_pdfs_per_hour": 561.0000261800012,
+    "queue_wait_seconds": {
+      "count": 1,
+      "min": 0.387075,
+      "max": 0.387075,
+      "mean": 0.387075,
+      "median": 0.387075,
+      "p90": 0.387075,
+      "p95": 0.387075
+    },
+    "processing_seconds": {
+      "count": 1,
+      "min": 6.030037,
+      "max": 6.030037,
+      "mean": 6.030037,
+      "median": 6.030037,
+      "p90": 6.030037,
+      "p95": 6.030037
+    },
+    "total_seconds": {
+      "count": 1,
+      "min": 6.417112,
+      "max": 6.417112,
+      "mean": 6.417112,
+      "median": 6.417112,
+      "p90": 6.417112,
+      "p95": 6.417112
+    },
+    "end_to_end_seconds": {
+      "count": 1,
+      "min": 6.417112,
+      "max": 6.417112,
+      "mean": 6.417112,
+      "median": 6.417112,
+      "p90": 6.417112,
+      "p95": 6.417112
+    },
+    "download_outputs": false
+  },
+  "accuracy": {
+    "benchmark_type": "accuracy",
+    "dataset_name": "ai4privacy/pii-masking-300k",
+    "split_name": "train",
+    "sample_size": 1,
+    "seed": 42,
+    "language_filter": "English",
+    "include_llm": false,
+    "iou_threshold": 0.5,
+    "row_duration_seconds": {
+      "count": 1,
+      "min": 5.6254026999813505,
+      "max": 5.6254026999813505,
+      "mean": 5.6254026999813505,
+      "median": 5.6254026999813505,
+      "p90": 5.6254026999813505,
+      "p95": 5.6254026999813505
+    },
+    "all_label_metrics": {
+      "tp": 1,
+      "fp": 3,
+      "fn": 6,
+      "precision": 0.25,
+      "recall": 0.14285714285714285,
+      "f1": 0.18181818181818182
+    },
+    "capability_slice_metrics": {
+      "tp": 1,
+      "fp": 2,
+      "fn": 0,
+      "precision": 0.3333333333333333,
+      "recall": 1.0,
+      "f1": 0.5
+    }
+  },
+  "html_report": "E:\\snv-PII-redact\\benchmark_outputs\\20260411T053440Z\\benchmark_report.html"
+}
