@@ -41,6 +41,8 @@ const state = {
   redactedFileName: "",
   lastError: "",
   lastUpdatedIso: "",
+  jobStartTime: null,
+  timerInterval: null,
   notifications: [],
   notificationCounter: 0,
   activeTopPanel: null,
@@ -85,6 +87,7 @@ const ui = {
   metricEntities: document.getElementById("metricEntities"),
   metricWarnings: document.getElementById("metricWarnings"),
   metricProgress: document.getElementById("metricProgress"),
+  metricTimer: document.getElementById("metricTimer"),
   primaryProgressFill: document.getElementById("primaryProgressFill"),
   secondaryProgressFill: document.getElementById("secondaryProgressFill"),
   statusProgressFill: document.getElementById("statusProgressFill"),
@@ -218,10 +221,11 @@ async function enqueueJob() {
 
   clearAlert();
 
-  try {
+    try {
     const payload = new FormData();
     payload.append("file", state.selectedFile, state.selectedFile.name);
     pushNotification("info", "Sanitization started", "Uploading document and creating job.");
+    startTimer();
 
     const response = await fetch(state.apiUrl, {
       method: "POST",
@@ -286,6 +290,7 @@ async function refreshStatus(isAutoRefresh) {
 
     if (state.jobStatus.status === "completed") {
       stopPolling();
+      stopTimer();
       await fetchRedactedPdf();
       const warningCount = Array.isArray(state.jobStatus.warnings) ? state.jobStatus.warnings.length : 0;
       if (warningCount > 0) {
@@ -293,6 +298,7 @@ async function refreshStatus(isAutoRefresh) {
       }
     } else if (state.jobStatus.status === "failed") {
       stopPolling();
+      stopTimer();
       clearRedactedBlob();
       if (state.jobStatus.error) {
         setAlert("Pipeline failure", state.jobStatus.error);
@@ -354,6 +360,8 @@ function clearRedactedBlob() {
 
 function resetWorkspace() {
   stopPolling();
+  stopTimer();
+  ui.metricTimer.textContent = "00:00";
   clearRedactedBlob();
   clearAlert();
   closeTopPanels(false);
@@ -393,6 +401,26 @@ function stopPolling() {
   if (state.pollHandle) {
     window.clearInterval(state.pollHandle);
     state.pollHandle = null;
+  }
+}
+
+function startTimer() {
+  stopTimer();
+  state.jobStartTime = Date.now();
+  ui.metricTimer.textContent = "00:00";
+  state.timerInterval = window.setInterval(() => {
+    if (!state.jobStartTime) return;
+    const totalSeconds = Math.floor((Date.now() - state.jobStartTime) / 1000);
+    const m = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
+    const s = String(totalSeconds % 60).padStart(2, "0");
+    ui.metricTimer.textContent = `${m}:${s}`;
+  }, 1000);
+}
+
+function stopTimer() {
+  if (state.timerInterval) {
+    window.clearInterval(state.timerInterval);
+    state.timerInterval = null;
   }
 }
 

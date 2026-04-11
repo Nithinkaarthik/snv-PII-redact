@@ -570,7 +570,7 @@
 
 <body class="bg-background text-on-surface selection:bg-primary/30">
   <header
-    class="fixed top-0 z-50 relative flex justify-between items-center w-full px-6 h-16 bg-surface/95 backdrop-blur-md border-b border-outline-variant/35">
+    class="fixed top-0 z-50 flex justify-between items-center w-full px-6 h-16 bg-surface/95 backdrop-blur-md border-b border-outline-variant/35">
     <div class="flex items-center min-w-[200px]">
       <span class="text-[11px] font-semibold uppercase tracking-[0.12em] text-on-surface-variant">SNV Redactor</span>
     </div>
@@ -781,6 +781,16 @@
                 <div class="w-24 h-1.5 bg-surface-container-highest rounded-full overflow-hidden">
                   <div id="statusProgressFill" class="progress-fill bg-primary h-full shadow-[0_0_8px_#F59E0B]"
                     style="width:0%"></div>
+                </div>
+              </div>
+
+              <div class="flex items-end justify-between">
+                <div>
+                  <p class="text-[10px] text-on-surface-variant uppercase font-mono mb-1">Run Time</p>
+                  <p class="text-2xl font-headline font-bold text-primary"><span id="metricTimer">00:00</span></p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="material-symbols-outlined text-primary text-xl">timer</span>
                 </div>
               </div>
             </div>
