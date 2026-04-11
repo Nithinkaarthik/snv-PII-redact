@@ -1,161 +1,163 @@
 <!doctype html>
 <html lang="en">
-  <head>
+
+<head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SNV Redactor Settings</title>
     <style>
-      :root {
-        --bg: #0f172a;
-        --card: #111827;
-        --muted: #94a3b8;
-        --text: #e2e8f0;
-        --accent: #22c55e;
-        --accent-2: #16a34a;
-        --danger: #ef4444;
-        --border: #334155;
-      }
+        :root {
+            --bg: #0f172a;
+            --card: #111827;
+            --muted: #94a3b8;
+            --text: #e2e8f0;
+            --accent: #22c55e;
+            --accent-2: #16a34a;
+            --danger: #ef4444;
+            --border: #334155;
+        }
 
-      * {
-        box-sizing: border-box;
-      }
+        * {
+            box-sizing: border-box;
+        }
 
-      body {
-        margin: 0;
-        min-height: 100vh;
-        font-family: Montserrat, "Segoe UI", Arial, sans-serif;
-        background: radial-gradient(circle at top right, #1f2937 0%, var(--bg) 56%);
-        color: var(--text);
-        display: flex;
-        justify-content: center;
-        padding: 28px 16px;
-      }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: Montserrat, "Segoe UI", Arial, sans-serif;
+            background: radial-gradient(circle at top right, #1f2937 0%, var(--bg) 56%);
+            color: var(--text);
+            display: flex;
+            justify-content: center;
+            padding: 28px 16px;
+        }
 
-      .panel {
-        width: min(760px, 100%);
-        background: linear-gradient(180deg, rgba(17, 24, 39, 0.96), rgba(17, 24, 39, 0.82));
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        box-shadow: 0 24px 52px rgba(2, 6, 23, 0.44);
-        padding: 24px;
-      }
+        .panel {
+            width: min(760px, 100%);
+            background: linear-gradient(180deg, rgba(17, 24, 39, 0.96), rgba(17, 24, 39, 0.82));
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            box-shadow: 0 24px 52px rgba(2, 6, 23, 0.44);
+            padding: 24px;
+        }
 
-      h1 {
-        margin: 0;
-        font-size: 1.55rem;
-      }
+        h1 {
+            margin: 0;
+            font-size: 1.55rem;
+        }
 
-      p {
-        color: var(--muted);
-        margin: 8px 0 0;
-      }
+        p {
+            color: var(--muted);
+            margin: 8px 0 0;
+        }
 
-      .group {
-        margin-top: 18px;
-      }
+        .group {
+            margin-top: 18px;
+        }
 
-      label {
-        display: block;
-        margin-bottom: 8px;
-        font-weight: 700;
-        letter-spacing: 0.01em;
-      }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 700;
+            letter-spacing: 0.01em;
+        }
 
-      input,
-      textarea {
-        width: 100%;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        background: rgba(15, 23, 42, 0.78);
-        color: var(--text);
-        font: inherit;
-        padding: 11px 12px;
-      }
+        input,
+        textarea {
+            width: 100%;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: rgba(15, 23, 42, 0.78);
+            color: var(--text);
+            font: inherit;
+            padding: 11px 12px;
+        }
 
-      textarea {
-        min-height: 150px;
-        resize: vertical;
-        line-height: 1.5;
-      }
+        textarea {
+            min-height: 150px;
+            resize: vertical;
+            line-height: 1.5;
+        }
 
-      .help {
-        margin-top: 8px;
-        font-size: 0.88rem;
-      }
+        .help {
+            margin-top: 8px;
+            font-size: 0.88rem;
+        }
 
-      .actions {
-        margin-top: 20px;
-        display: flex;
-        gap: 10px;
-        align-items: center;
-      }
+        .actions {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
 
-      button {
-        border: 0;
-        border-radius: 10px;
-        padding: 10px 16px;
-        font: inherit;
-        font-weight: 700;
-        cursor: pointer;
-        background: var(--accent);
-        color: #052e16;
-      }
+        button {
+            border: 0;
+            border-radius: 10px;
+            padding: 10px 16px;
+            font: inherit;
+            font-weight: 700;
+            cursor: pointer;
+            background: var(--accent);
+            color: #052e16;
+        }
 
-      button:hover {
-        background: var(--accent-2);
-      }
+        button:hover {
+            background: var(--accent-2);
+        }
 
-      .secondary {
-        background: #334155;
-        color: #f8fafc;
-      }
+        .secondary {
+            background: #334155;
+            color: #f8fafc;
+        }
 
-      .secondary:hover {
-        background: #475569;
-      }
+        .secondary:hover {
+            background: #475569;
+        }
 
-      .status {
-        min-height: 20px;
-        font-size: 0.9rem;
-      }
+        .status {
+            min-height: 20px;
+            font-size: 0.9rem;
+        }
 
-      .status.error {
-        color: var(--danger);
-      }
+        .status.error {
+            color: var(--danger);
+        }
 
-      .status.ok {
-        color: #4ade80;
-      }
+        .status.ok {
+            color: #4ade80;
+        }
     </style>
-  </head>
-  <body>
+</head>
+
+<body>
     <main class="panel">
-      <h1>SNV Redactor Upload Guard</h1>
-      <p>Allowlist specific websites and route PDF sanitization through your backend API.</p>
+        <h1>SNV Redactor Upload Guard</h1>
+        <p>Allowlist specific websites and route PDF sanitization through your backend API.</p>
 
-      <section class="group">
-        <label for="apiBaseUrl">Backend API Base URL</label>
-        <input id="apiBaseUrl" type="url" placeholder="http://127.0.0.1:8000" />
-        <p class="help">The extension calls /api/v1/sanitize, /api/v1/jobs/{job_id}, and /api/v1/download/{job_id}.</p>
-      </section>
+        <section class="group">
+            <label for="apiBaseUrl">Backend API Base URL</label>
+            <input id="apiBaseUrl" type="url" placeholder="http://127.0.0.1:8000" />
+            <p class="help">The extension calls /api/v1/sanitize, /api/v1/jobs/{job_id}, and /api/v1/download/{job_id}.
+            </p>
+        </section>
 
-      <section class="group">
-        <label for="allowedDomains">Allowlisted Domains</label>
-        <textarea
-          id="allowedDomains"
-          placeholder="one domain per line\nexample.com\n*.partner.example"
-        ></textarea>
-        <p class="help">Extension intercepts uploads only on these domains. Supports wildcard prefix (*.example.com).</p>
-      </section>
+        <section class="group">
+            <label for="allowedDomains">Allowlisted Domains</label>
+            <textarea id="allowedDomains" placeholder="one domain per line\nexample.com\n*.partner.example"></textarea>
+            <p class="help">Extension intercepts uploads only on these domains. Supports wildcard prefix
+                (*.example.com).</p>
+        </section>
 
-      <div class="actions">
-        <button id="saveBtn" type="button">Save Settings</button>
-        <button id="restoreDefaultsBtn" class="secondary" type="button">Restore Defaults</button>
-        <div id="statusText" class="status" aria-live="polite"></div>
-      </div>
+        <div class="actions">
+            <button id="saveBtn" type="button">Save Settings</button>
+            <button id="restoreDefaultsBtn" class="secondary" type="button">Restore Defaults</button>
+            <div id="statusText" class="status" aria-live="polite"></div>
+        </div>
     </main>
 
     <script src="shared/config.js"></script>
     <script src="options.js"></script>
-  </body>
+</body>
+
 </html>
