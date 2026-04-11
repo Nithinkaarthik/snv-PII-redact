@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SNV Redactor Dashboard</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #111827;
+        --panel-2: #1f2937;
+        --text: #e5e7eb;
+        --muted: #94a3b8;
+        --border: #334155;
+        --success: #22c55e;
+        --danger: #f87171;
+        --warning: #f59e0b;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-width: 360px;
+        max-width: 420px;
+        font-family: Montserrat, "Segoe UI", Arial, sans-serif;
+        background: radial-gradient(circle at top right, #1e293b 0%, var(--bg) 60%);
+        color: var(--text);
+      }
+
+      main {
+        padding: 14px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 1.05rem;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .status-line {
+        margin-top: 8px;
+        font-size: 0.82rem;
+        color: var(--muted);
+      }
+
+      .panel {
+        margin-top: 12px;
+        padding: 12px;
+        background: linear-gradient(180deg, rgba(17, 24, 39, 0.95), rgba(17, 24, 39, 0.82));
+        border: 1px solid var(--border);
+        border-radius: 12px;
+      }
+
+      .row {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 8px;
+      }
+
+      .label {
+        color: var(--muted);
+        font-size: 0.83rem;
+      }
+
+      .value {
+        text-align: right;
+        font-size: 0.83rem;
+        max-width: 210px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .ok {
+        color: var(--success);
+      }
+
+      .error {
+        color: var(--danger);
+      }
+
+      .warn {
+        color: var(--warning);
+      }
+
+      .actions {
+        margin-top: 10px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      button {
+        border: 1px solid var(--border);
+        background: var(--panel-2);
+        color: var(--text);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font: inherit;
+        font-size: 0.82rem;
+        cursor: pointer;
+      }
+
+      button:hover {
+        border-color: #64748b;
+      }
+
+      .error-list {
+        margin: 10px 0 0;
+        padding: 0;
+        list-style: none;
+        max-height: 240px;
+        overflow: auto;
+        display: grid;
+        gap: 8px;
+      }
+
+      .error-item {
+        border: 1px solid #374151;
+        background: rgba(15, 23, 42, 0.8);
+        border-radius: 8px;
+        padding: 8px;
+      }
+
+      .error-meta {
+        font-size: 0.74rem;
+        color: var(--muted);
+      }
+
+      .error-text {
+        margin-top: 4px;
+        font-size: 0.8rem;
+        line-height: 1.35;
+      }
+
+      .empty {
+        margin-top: 10px;
+        font-size: 0.82rem;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>SNV Redactor Dashboard</h1>
+      <div id="globalStatus" class="status-line">Loading extension status...</div>
+
+      <section class="panel">
+        <div class="label">Backend</div>
+        <div class="row">
+          <span class="label">API Base URL</span>
+          <span id="apiBaseValue" class="value">-</span>
+        </div>
+        <div class="row">
+          <span class="label">Allowlisted Domains</span>
+          <span id="allowlistCountValue" class="value">0</span>
+        </div>
+        <div class="row">
+          <span class="label">Health</span>
+          <span id="backendHealthValue" class="value muted">Not tested</span>
+        </div>
+        <div class="actions">
+          <button id="testBackendBtn" type="button">Test Backend</button>
+          <button id="openOptionsBtn" type="button">Open Settings</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="row" style="margin-top: 0">
+          <span class="label">Recent Errors</span>
+          <span id="errorCountValue" class="value">0</span>
+        </div>
+
+        <div class="actions">
+          <button id="refreshBtn" type="button">Refresh</button>
+          <button id="clearErrorsBtn" type="button">Clear Errors</button>
+          <button id="copyLatestBtn" type="button">Copy Latest</button>
+        </div>
+
+        <p id="emptyState" class="empty">No errors logged yet.</p>
+        <ul id="errorList" class="error-list" hidden></ul>
+      </section>
+    </main>
+
+    <script src="shared/config.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

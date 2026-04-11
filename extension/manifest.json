@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "SNV DLP Tripwire",
+  "description": "Intercepts PDF uploads, prompts for sanitization, and swaps sanitized files back into upload inputs.",
+  "version": "0.2.0",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_end"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "styles.css"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "action": {
+    "default_title": "SNV DLP Tripwire"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "snv-redactor-upload-guard@example.com"
+    }
+  }
+}

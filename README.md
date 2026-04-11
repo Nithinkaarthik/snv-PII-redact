@@ -136,6 +136,39 @@ The frontend is served directly by FastAPI. Start the backend, then open the app
 http://localhost:8000
 ```
 
+## Browser Extension MVP
+
+The repository now includes a browser extension under `extension/` that:
+
+- Intercepts file input changes containing PDF uploads.
+- Sends PDFs to this backend (`/api/v1/sanitize` -> `/api/v1/jobs/{job_id}` -> `/api/v1/download/{job_id}`).
+- Replaces the selected upload file with the sanitized PDF.
+- Does not auto-submit forms.
+- Runs only on domains in an explicit allowlist.
+- Provides a popup dashboard to inspect extension errors and backend health.
+
+Default extension backend URL: `http://127.0.0.1:8000`
+
+Load in Chrome:
+
+1. Open `chrome://extensions`.
+2. Enable Developer mode.
+3. Click **Load unpacked** and select the `extension/` folder.
+
+Load in Firefox:
+
+1. Open `about:debugging#/runtime/this-firefox`.
+2. Click **Load Temporary Add-on**.
+3. Select `extension/manifest.json`.
+
+Then open Extension Options and add your allowlisted domains (one per line).
+
+To inspect extension errors:
+
+1. Click the extension icon in your browser toolbar.
+2. Use the popup dashboard to view recent errors.
+3. Use **Test Backend**, **Refresh**, **Copy Latest**, and **Clear Errors** as needed.
+
 ## API Contract
 
 ### POST `/api/v1/sanitize`
@@ -150,6 +183,7 @@ http://localhost:8000
 	"status_url": "/api/v1/jobs/<job_id>",
 	"download_url": "/api/v1/download/<job_id>"
 }
+```
 
 
 ### GET `/api/v1/jobs/{job_id}`
