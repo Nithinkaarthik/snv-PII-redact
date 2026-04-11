@@ -213,6 +213,19 @@ _LLM_LOW_SIGNAL_TOKENS: Set[str] = {
     "yours",
 }
 
+LLM_MAX_LOCALIZED_ENTITY_TOKENS = max(4, int(os.getenv("LLM_MAX_LOCALIZED_ENTITY_TOKENS", "14")))
+LLM_MAX_LOCALIZED_ENTITY_CHARS = max(24, int(os.getenv("LLM_MAX_LOCALIZED_ENTITY_CHARS", "140")))
+FUZZY_MAX_TOKEN_PADDING = max(1, int(os.getenv("FUZZY_MAX_TOKEN_PADDING", "2")))
+FUZZY_MIN_TOKEN_PADDING = max(0, int(os.getenv("FUZZY_MIN_TOKEN_PADDING", "1")))
+FUZZY_LENGTH_PENALTY_PER_EXTRA_TOKEN = max(
+    0.0,
+    min(8.0, float(os.getenv("FUZZY_LENGTH_PENALTY_PER_EXTRA_TOKEN", "2.0"))),
+)
+FUZZY_LENGTH_PENALTY_CAP = max(
+    FUZZY_LENGTH_PENALTY_PER_EXTRA_TOKEN,
+    min(25.0, float(os.getenv("FUZZY_LENGTH_PENALTY_CAP", "14.0"))),
+)
+
 
 class BBoxModel(BaseModel):
     page_number: int = Field(..., ge=1)
@@ -1166,8 +1179,24 @@ def run_llm_context_triage(
         if _is_low_signal_llm_quote(candidate.quote, inferred_type):
             continue
 
+        quote_tokens = len(re.findall(r"[A-Za-z0-9]+", candidate.quote))
+        _log_debug_block(
+            "LLM_CANDIDATE_QUOTE",
+            quote=candidate.quote,
+            inferred_type=inferred_type,
+            confidence=round(candidate.confidence, 4),
+            quote_tokens=quote_tokens,
+            quote_chars=len(candidate.quote),
+        )
+
         matches = find_fuzzy_spans(candidate.quote, word_spans, threshold=FUZZY_MATCH_THRESHOLD)
         if not matches:
+            _log_debug_block(
+                "LLM_CANDIDATE_NO_FUZZY_MATCH",
+                quote=candidate.quote,
+                inferred_type=inferred_type,
+                threshold=FUZZY_MATCH_THRESHOLD,
+            )
             continue
 
         for start_char, end_char, similarity_score in matches:
@@ -1182,6 +1211,32 @@ def run_llm_context_triage(
 
             localized_text = canonical_text[start_char:end_char].strip() or candidate.quote
             if _is_low_signal_llm_quote(localized_text, inferred_type):
+                continue
+
+            localized_tokens = len(re.findall(r"[A-Za-z0-9]+", localized_text))
+            inflation_ratio = localized_tokens / max(1, quote_tokens)
+            _log_debug_block(
+                "LLM_LOCALIZED_SPAN",
+                quote=candidate.quote,
+                localized_text=localized_text,
+                quote_tokens=quote_tokens,
+                localized_tokens=localized_tokens,
+                inflation_ratio=round(inflation_ratio, 3),
+                similarity=round(similarity_score, 2),
+                start_char=start_char,
+                end_char=end_char,
+                combined_conf=round(combined_conf, 4),
+            )
+
+            if _is_oversized_llm_localized_span(localized_text):
+                _log_debug_block(
+                    "LLM_LOCALIZED_SPAN_SKIPPED_OVERSIZED",
+                    quote=candidate.quote,
+                    localized_text=localized_text,
+                    inferred_type=inferred_type,
+                    localized_tokens=localized_tokens,
+                    localized_chars=len(localized_text),
+                )
                 continue
 
             detections.append(
@@ -1329,11 +1384,23 @@ def find_fuzzy_spans(
     # Calculate token lengths for both raw and normalized versions
     raw_token_count = max(1, len(quote.split()))
     norm_token_count = max(1, len(normalized_quote.split()))
-    
-    # Establish a window sizes range covering the min tokens and max tokens + padding
-    min_window = max(1, min(raw_token_count, norm_token_count) - 3)
-    max_window = max(raw_token_count, norm_token_count) + 5
+
+    # Keep candidate window size close to quote size to avoid sentence-length expansions.
+    quote_token_count = min(raw_token_count, norm_token_count)
+    min_window = max(1, quote_token_count - FUZZY_MIN_TOKEN_PADDING)
+    max_window = max(min_window, quote_token_count + FUZZY_MAX_TOKEN_PADDING)
     window_sizes = list(range(min_window, max_window + 1))
+
+    _log_debug_block(
+        "FUZZY_WINDOW_CONFIG",
+        quote=quote,
+        raw_token_count=raw_token_count,
+        norm_token_count=norm_token_count,
+        min_window=min_window,
+        max_window=max_window,
+        window_count=len(window_sizes),
+        threshold=threshold,
+    )
 
     candidates: List[Tuple[float, int, int]] = []
     total_words = len(word_spans)
@@ -1354,15 +1421,56 @@ def find_fuzzy_spans(
             if not normalized_candidate:
                 continue
 
+            ratio_score = float(fuzz.ratio(normalized_quote, normalized_candidate))
+            token_sort_score = float(fuzz.token_sort_ratio(normalized_quote, normalized_candidate))
+            token_set_score = float(fuzz.token_set_ratio(normalized_quote, normalized_candidate))
+            partial_score = float(fuzz.partial_ratio(normalized_quote, normalized_candidate))
+
             similarity = max(
-                float(fuzz.ratio(normalized_quote, normalized_candidate)),
-                float(fuzz.token_sort_ratio(normalized_quote, normalized_candidate)),
-                float(fuzz.token_set_ratio(normalized_quote, normalized_candidate)),
-                float(fuzz.partial_ratio(normalized_quote, normalized_candidate)),
+                ratio_score,
+                token_sort_score,
+                token_set_score,
+                partial_score,
             )
-            # Strongly reward exact containment after normalization (common with extra context words).
-            if normalized_quote in normalized_candidate or normalized_candidate in normalized_quote:
-                similarity = max(similarity, 98.0)
+
+            quote_tokens_len = max(1, len(normalized_quote.split()))
+            candidate_tokens_len = max(1, len(normalized_candidate.split()))
+            extra_tokens = max(0, candidate_tokens_len - quote_tokens_len)
+            if extra_tokens > 0:
+                similarity -= min(
+                    FUZZY_LENGTH_PENALTY_CAP,
+                    float(extra_tokens) * FUZZY_LENGTH_PENALTY_PER_EXTRA_TOKEN,
+                )
+
+            # Reward containment only for near-length candidates.
+            if (
+                normalized_quote in normalized_candidate or normalized_candidate in normalized_quote
+            ) and extra_tokens <= 2:
+                similarity = max(similarity, 96.0)
+
+            if similarity >= max(float(threshold) - 3.0, 80.0):
+                best_metric = max(
+                    [
+                        ("ratio", ratio_score),
+                        ("token_sort", token_sort_score),
+                        ("token_set", token_set_score),
+                        ("partial", partial_score),
+                    ],
+                    key=lambda item: item[1],
+                )
+                _log_debug_block(
+                    "FUZZY_CANDIDATE_NEAR_THRESHOLD",
+                    quote=quote,
+                    candidate_text=candidate_text,
+                    candidate_tokens=candidate_tokens_len,
+                    quote_tokens=quote_tokens_len,
+                    extra_tokens=extra_tokens,
+                    best_metric=best_metric[0],
+                    best_metric_score=round(best_metric[1], 2),
+                    similarity=round(similarity, 2),
+                    start_char=left.start_char,
+                    end_char=right.end_char,
+                )
 
             candidates.append((similarity, left.start_char, right.end_char))
 
@@ -1401,6 +1509,25 @@ def _adaptive_fuzzy_threshold(normalized_quote: str, base_threshold: int) -> int
     if token_count >= 4 or char_count >= 28:
         return max(84, base_threshold - 8)
     return max(88, base_threshold - 4)
+
+
+def _is_oversized_llm_localized_span(localized_text: str) -> bool:
+    compact = str(localized_text or "").strip()
+    if not compact:
+        return False
+
+    token_count = len(re.findall(r"[A-Za-z0-9]+", compact))
+    if token_count > LLM_MAX_LOCALIZED_ENTITY_TOKENS:
+        return True
+
+    if len(compact) > LLM_MAX_LOCALIZED_ENTITY_CHARS:
+        return True
+
+    sentence_ending_count = len(re.findall(r"[\.!?;]", compact))
+    if sentence_ending_count >= 2 and token_count >= 8:
+        return True
+
+    return False
 
 
 def apply_secure_redactions(pdf_bytes: bytes, detections: Sequence[Detection]) -> bytes:
@@ -1695,20 +1822,22 @@ def _build_llm_messages(
         "1) Return a JSON array as the top-level value, no wrapper object.\n"
         "2) Each array item must be an object with exactly: quote, category, confidence.\n"
         "3) quote must be verbatim text from input.\n"
-        "4) category must be a concise label (prefer UPPER_SNAKE_CASE) chosen by you.\n"
-        "5) category is open-ended; do not limit yourself to any fixed list.\n"
-        "6) confidence must be numeric in range 0 to 1.\n"
-        "7) Do not return markdown, prose, code fences, or wrapper objects.\n"
-        "8) First output character must be '[' and last character must be ']'.\n"
-        "9) If nothing is found, return [].\n"
-        "10) Never include analysis, explanation, or preface text."
+        "4) quote must be a minimal atomic value. Never include field labels, keys, or contextual headers in the quote (e.g., extract 'MARK-3456' not 'employee id MARK-3456').\n"
+        "5) quote must be complete, not a fragment.\n"
+        "6) For URL, email, IP, account, ID, phone: the quote must be the full token only without surrounding text.\n"
+        "7) category is open-ended; do not restrict category to a fixed list only. Use UPPER_SNAKE_CASE.\n"
+        "8) confidence must be numeric in range 0 to 1.\n"
+        "9) No prose, no markdown, no code fences. Return the JSON array directly.\n"
+        "10) If uncertain or nothing is found, return [].\n"
+        "11) Deduplicate exact quote+category pairs.\n"
+        "12) Prefer exact value-only spans, not full sentences that contain the value."
     )
 
     if has_table_context:
         system_prompt += (
-            "\n11) Input may include [TABLE] blocks where each row uses ' | ' as column separators."
-            "\n12) Treat each cell value as independently detectable sensitive text."
-            "\n13) Preserve exact quote text from cells, including wrapped values."
+            "\n13) Input may include [TABLE] blocks where each row uses ' | ' as column separators."
+            "\n14) Treat each cell value as independently detectable sensitive text."
+            "\n15) Preserve exact quote text from cells, including wrapped values."
         )
 
     user_prompt = f"""

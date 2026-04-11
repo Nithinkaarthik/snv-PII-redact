@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 try:
+    from backend.config import LOGGER
     from backend.models import BoundingBox, OCRWord, TableRegion, WordSpan
 except ImportError:
+    from config import LOGGER
     from models import BoundingBox, OCRWord, TableRegion, WordSpan
+
+
+_DEBUG_FALSE_VALUES = {"0", "false", "no", "off"}
+_DEBUG_ENABLED = os.getenv("BACKEND_DEBUG_BLOCKS", "0").strip().lower() not in _DEBUG_FALSE_VALUES
+_BBOX_DEBUG_MIN_SPAN = max(20, int(os.getenv("BBOX_DEBUG_MIN_SPAN", "80")))
 
 
 def deduplicate_boxes(boxes: Sequence[BoundingBox]) -> List[BoundingBox]:
@@ -321,4 +329,15 @@ def get_bboxes_for_offsets(
         for span_start, span_end, bbox in char_map
         if span_start < end_char and span_end > start_char
     ]
+
+    span_length = end_char - start_char
+    if _DEBUG_ENABLED and span_length >= _BBOX_DEBUG_MIN_SPAN:
+        LOGGER.info(
+            "[DEBUG] BBOX_SPAN_LOOKUP span_start=%s span_end=%s span_length=%s overlap_count=%s",
+            start_char,
+            end_char,
+            span_length,
+            len(overlapping_boxes),
+        )
+
     return deduplicate_boxes(sorted(overlapping_boxes, key=lambda box: (box.page_number, box.y0, box.x0)))
