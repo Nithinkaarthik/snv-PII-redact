@@ -1,0 +1,87 @@
+{
+  "run_dir": "E:\\snv-PII-redact\\benchmark_outputs\\20260411T064734Z",
+  "performance": {
+    "benchmark_type": "performance",
+    "api_base": "http://127.0.0.1:8000",
+    "pdf_dir": "E:\\snv-PII-redact\\pdfs",
+    "requested_pdf_count": 30,
+    "actual_pdf_count": 30,
+    "completed_jobs": 30,
+    "failed_jobs": 0,
+    "failure_rate": 0.0,
+    "throughput_pdfs_per_hour": 514.3208179061097,
+    "queue_wait_seconds": {
+      "count": 30,
+      "min": 0.51716,
+      "max": 205.525318,
+      "mean": 101.39921176666667,
+      "median": 92.755797,
+      "p90": 185.96922030000002,
+      "p95": 194.7591818
+    },
+    "processing_seconds": {
+      "count": 30,
+      "min": 4.019553,
+      "max": 18.35503,
+      "mean": 6.9827275,
+      "median": 6.205140999999999,
+      "p90": 10.183825,
+      "p95": 12.59829199999999
+    },
+    "total_seconds": {
+      "count": 30,
+      "min": 11.044713,
+      "max": 209.544871,
+      "mean": 108.38193926666668,
+      "median": 97.9083935,
+      "p90": 192.036285,
+      "p95": 201.91835384999996
+    },
+    "end_to_end_seconds": {
+      "count": 30,
+      "min": 11.044713,
+      "max": 209.544871,
+      "mean": 108.38193926666668,
+      "median": 97.9083935,
+      "p90": 192.036285,
+      "p95": 201.91835384999996
+    },
+    "download_outputs": false
+  },
+  "accuracy": {
+    "benchmark_type": "accuracy",
+    "dataset_name": "ai4privacy/pii-masking-300k",
+    "split_name": "train",
+    "sample_size": 30,
+    "seed": 42,
+    "language_filter": "English",
+    "include_llm": true,
+    "iou_threshold": 0.5,
+    "row_duration_seconds": {
+      "count": 30,
+      "min": 3.7284932999755256,
+      "max": 120.87270010000793,
+      "mean": 11.473376580003727,
+      "median": 6.667655600031139,
+      "p90": 13.065968840033747,
+      "p95": 14.150838424987157
+    },
+    "all_label_metrics": {
+      "tp": 10,
+      "fp": 38,
+      "fn": 184,
+      "precision": 0.20833333333333334,
+      "recall": 0.05154639175257732,
+      "f1": 0.08264462809917354
+    },
+    "capability_slice_metrics": {
+      "tp": 10,
+      "fp": 20,
+      "fn": 32,
+      "precision": 0.3333333333333333,
+      "recall": 0.23809523809523808,
+      "f1": 0.2777777777777778
+    }
+  },
+  "html_report": "E:\\snv-PII-redact\\benchmark_outputs\\20260411T064734Z\\benchmark_report.html"
+}
