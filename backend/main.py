@@ -941,6 +941,23 @@ def run_sanitization_pipeline(
                         line_cache=page_line_cache,
                     )
 
+            try:
+                from backend.face_detection import detect_faces_on_page
+                face_boxes = detect_faces_on_page(page, page_number)
+                if face_boxes:
+                    face_detection = Detection(
+                        entity_text="[FACE - REDACTED]",
+                        entity_type="FACE",
+                        confidence_score=0.99,
+                        source="Hybrid",  # Using existing type
+                        boxes=face_boxes,
+                        supporting_sources=[],
+                        decision_reason="cv2_haar_cascade"
+                    )
+                    page_detections.append(face_detection)
+            except Exception as e:
+                _log_debug_block("FACE_DETECTION_ERROR", error=str(e))
+
             page_boxes = [
                 box
                 for detection in page_detections
@@ -972,6 +989,33 @@ def run_sanitization_pipeline(
 
             if progress_callback is not None:
                 progress_callback(page_number + 1, total_pages)
+
+        # Perform anti-OSINT font sanitization
+        try:
+            document.subset_fonts()
+        except Exception as e:
+            _log_debug_block("FONT_SUBSET_ERROR", error=str(e))
+
+        base14 = {
+            "/Helvetica", "/Times-Roman", "/Courier", "/Symbol", "/ZapfDingbats",
+            "/Helvetica-Bold", "/Helvetica-Oblique", "/Helvetica-BoldOblique",
+            "/Times-Bold", "/Times-Italic", "/Times-BoldItalic",
+            "/Courier-Bold", "/Courier-Oblique", "/Courier-BoldOblique"
+        }
+        for xref in range(1, document.xref_length()):
+            try:
+                obj_type = document.xref_get_key(xref, "Type")[1]
+                if obj_type in ("/Font", "/FontDescriptor"):
+                    for key in ("BaseFont", "FontName"):
+                        val = document.xref_get_key(xref, key)[1]
+                        if val and val != "null" and val not in base14:
+                            if "+" in val:
+                                prefix, _ = val.split("+", 1)
+                                document.xref_set_key(xref, key, f"{prefix}+SanitizedFont{xref}")
+                            else:
+                                document.xref_set_key(xref, key, f"/SanitizedFont{xref}")
+            except Exception:
+                continue
 
         redacted_pdf_bytes = document.tobytes(garbage=4, deflate=True, clean=True)
 
@@ -1176,8 +1220,7 @@ def run_llm_context_triage(
                 response_preview=preview or "<empty>",
             )
             warnings.append(
-                "LLM pass "
-                f"{pass_index}/{llm_calls_per_page} returned non-JSON output after retries and was skipped."
+                f"LLM pass {pass_index}/{llm_calls_per_page} returned non-JSON output after retries and was skipped (Got: '{preview}')."
             )
             continue
 
@@ -2008,6 +2051,10 @@ def _call_openrouter_chat_completion(
 
     if not isinstance(parsed, dict):
         raise RuntimeError("OpenRouter API response shape is invalid.")
+        
+    if "error" in parsed:
+        err_msg = parsed["error"].get("message", str(parsed["error"]))
+        raise RuntimeError(f"OpenRouter upstream error: {err_msg}")
 
     return parsed
 
@@ -2316,8 +2363,9 @@ def _build_llm_quote_candidates_from_items(items: Sequence[Any]) -> List[LLMQuot
 
 
 def _parse_llm_quote_candidates(raw_content: str) -> Tuple[List[LLMQuoteCandidate], bool]:
-    if not raw_content:
-        return [], False
+    if not raw_content or not raw_content.strip():
+        # LLM might occasionally return nothing if it found no entities under strong system prompting
+        return [], True
 
     payload: Optional[Any] = None
     primary_text = raw_content.strip()
@@ -2350,6 +2398,14 @@ def _parse_llm_quote_candidates(raw_content: str) -> Tuple[List[LLMQuoteCandidat
     if plaintext_items:
         candidates = _build_llm_quote_candidates_from_items(plaintext_items)
         return candidates, True
+
+    # If the response is short and seems to indicate nothing was found, or contains common refusals
+    lower_text = primary_text.lower()
+    if len(lower_text) < 150 and any(
+        kw in lower_text
+        for kw in ("none", "no pii", "not found", "n/a", "no sensitive", "[]", "{}", "nothing", "no personally identifiable")
+    ):
+        return [], True
 
     return [], False
 
