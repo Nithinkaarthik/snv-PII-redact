@@ -1110,67 +1110,95 @@ def run_llm_context_triage(
     model = os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL)
     api_base = os.getenv("OPENROUTER_API_BASE", DEFAULT_OPENROUTER_API_BASE)
     llm_max_output_tokens = max(300, min(1800, int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "700"))))
+    llm_calls_per_page = max(1, int(os.getenv("LLM_CALLS_PER_PAGE", "2")))
     text_slice = canonical_text[:LLM_TEXT_CHAR_LIMIT]
     has_table_context = TABLE_PARSER_ENABLED and bool(table_regions)
 
-    raw_content = ""
-    candidates: List[LLMQuoteCandidate] = []
-    parse_succeeded = False
+    merged_candidates: Dict[Tuple[str, str], LLMQuoteCandidate] = {}
+    successful_passes = 0
 
-    for attempt in range(1, LLM_PARSE_MAX_RETRIES + 1):
-        retry_feedback = ""
-        if attempt > 1:
-            retry_feedback = (
-                "Previous response was invalid. Return ONLY a top-level JSON array of "
-                "objects with quote, category, confidence."
-            )
+    for pass_index in range(1, llm_calls_per_page + 1):
+        raw_content = ""
+        pass_candidates: List[LLMQuoteCandidate] = []
+        parse_succeeded = False
+        terminal_error: Optional[str] = None
 
-        try:
-            response_json = _call_openrouter_chat_completion(
-                api_base=api_base,
-                api_key=api_key,
-                model=model,
-                messages=_build_llm_messages(
-                    text_slice,
-                    retry_feedback=retry_feedback,
-                    previous_response=raw_content,
-                    has_table_context=has_table_context,
-                ),
-                temperature=0.0,
-                max_tokens=llm_max_output_tokens,
-            )
-            raw_content = _read_completion_content(response_json)
-        except Exception as exc:  # broad except to guarantee fallback behavior
-            if attempt >= LLM_PARSE_MAX_RETRIES:
-                warnings.append(
-                    "LLM step failed after retries and pipeline continued with Presidio-only detections: "
-                    f"{str(exc)}"
+        for attempt in range(1, LLM_PARSE_MAX_RETRIES + 1):
+            retry_feedback = ""
+            if attempt > 1:
+                retry_feedback = (
+                    "Previous response was invalid. Return ONLY a top-level JSON array of "
+                    "objects with quote, category, confidence."
                 )
-                return [], warnings
+
+            try:
+                response_json = _call_openrouter_chat_completion(
+                    api_base=api_base,
+                    api_key=api_key,
+                    model=model,
+                    messages=_build_llm_messages(
+                        text_slice,
+                        retry_feedback=retry_feedback,
+                        previous_response=raw_content,
+                        has_table_context=has_table_context,
+                    ),
+                    temperature=0.0,
+                    max_tokens=llm_max_output_tokens,
+                )
+                raw_content = _read_completion_content(response_json)
+            except Exception as exc:  # broad except to guarantee fallback behavior
+                if attempt >= LLM_PARSE_MAX_RETRIES:
+                    terminal_error = str(exc)
+                    break
+                continue
+
+            pass_candidates, parse_succeeded = _parse_llm_quote_candidates(raw_content)
+            if parse_succeeded:
+                break
+
+        if terminal_error is not None:
+            warnings.append(
+                "LLM pass "
+                f"{pass_index}/{llm_calls_per_page} failed after retries and was skipped: {terminal_error}"
+            )
             continue
 
-        candidates, parse_succeeded = _parse_llm_quote_candidates(raw_content)
-        if parse_succeeded:
-            break
+        if not parse_succeeded:
+            preview = re.sub(r"\s+", " ", raw_content).strip()
+            if LLM_RETRY_PREVIEW_CHARS > 0:
+                preview = preview[:LLM_RETRY_PREVIEW_CHARS]
+
+            _log_debug_block(
+                "LLM_PARSE_FAILURE",
+                pass_index=pass_index,
+                total_passes=llm_calls_per_page,
+                attempts=LLM_PARSE_MAX_RETRIES,
+                response_preview=preview or "<empty>",
+            )
+            warnings.append(
+                "LLM pass "
+                f"{pass_index}/{llm_calls_per_page} returned non-JSON output after retries and was skipped."
+            )
+            continue
+
+        successful_passes += 1
+        for candidate in pass_candidates:
+            normalized_quote = re.sub(r"\s+", " ", candidate.quote).strip().lower()
+            normalized_category = re.sub(r"\s+", " ", candidate.category).strip().lower()
+            key = (normalized_quote, normalized_category)
+            existing = merged_candidates.get(key)
+            if existing is None or candidate.confidence > existing.confidence:
+                merged_candidates[key] = candidate
+
+    candidates = list(merged_candidates.values())
+    _log_debug_block(
+        "LLM_MULTI_PASS_SUMMARY",
+        requested_passes=llm_calls_per_page,
+        successful_passes=successful_passes,
+        merged_candidate_count=len(candidates),
+    )
 
     if not candidates:
-        if parse_succeeded:
-            # A valid empty array means the model found no LLM entities, not a parse failure.
-            return [], warnings
-
-        preview = re.sub(r"\s+", " ", raw_content).strip()
-        if LLM_RETRY_PREVIEW_CHARS > 0:
-            preview = preview[:LLM_RETRY_PREVIEW_CHARS]
-
-        _log_debug_block(
-            "LLM_PARSE_FAILURE",
-            attempts=LLM_PARSE_MAX_RETRIES,
-            response_preview=preview or "<empty>",
-        )
-        warnings.append(
-            "LLM returned non-JSON output after retries for at least one chunk. "
-            "That chunk was skipped and processing continued."
-        )
         return [], warnings
 
     detections: List[Detection] = []
