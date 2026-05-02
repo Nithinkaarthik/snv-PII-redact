@@ -1,1 +1,33 @@
+# Environment
 .env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.venv/
+venv/
+virtualenv/
+
+# Node / JS
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project
+benchmark_outputs/
+*.html
+
+# Extension (built artifacts)
+extension/*.zip

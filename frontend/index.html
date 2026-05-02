@@ -683,6 +683,17 @@
             <p id="fileMetaValue" class="text-[10px] text-on-surface-variant leading-relaxed">No file loaded.</p>
           </div>
 
+          <div class="flex items-center justify-between p-3 bg-surface-container-lowest rounded-lg border border-outline-variant/10">
+            <div class="flex items-center gap-2">
+              <span class="material-symbols-outlined text-base text-on-surface-variant">face</span>
+              <span class="text-[10px] text-on-surface-variant uppercase font-mono tracking-widest">Face Detection</span>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input id="faceDetectionToggle" type="checkbox" class="sr-only peer" checked />
+              <div class="w-9 h-5 bg-surface-container-highest rounded-full peer peer-checked:bg-primary peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-on-surface after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:bg-on-primary"></div>
+            </label>
+          </div>
+
           <div class="p-4 bg-surface-container-lowest rounded-lg border border-outline-variant/10 flex flex-col gap-3">
             <p class="text-[10px] text-on-surface-variant uppercase font-mono tracking-widest">Guided Flow</p>
             <div class="workflow-grid">
@@ -729,7 +740,20 @@
         </div>
       </section>
 
-      <section class="order-3 col-span-12 reveal reveal-delay-2">
+      <section class="order-3 col-span-12 reveal">
+        <div
+          class="motion-panel liquid-panel bg-surface-container-low rounded-xl border border-outline-variant/10 shadow-2xl p-6">
+          <div class="flex items-center gap-4 mb-4">
+            <span class="material-symbols-outlined text-primary">speed</span>
+            <h3 class="text-xs font-label uppercase tracking-[0.1em] text-primary font-bold">Pipeline Performance</h3>
+          </div>
+          <div id="pipelineTimingContainer" class="flex flex-col gap-1 text-[11px] font-mono">
+            <div class="text-on-surface-variant">Processing...</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="order-4 col-span-12 reveal reveal-delay-2">
         <div
           class="motion-panel liquid-panel bg-surface-container-low rounded-xl border border-outline-variant/10 shadow-2xl flex flex-col overflow-hidden h-full">
           <div
@@ -839,7 +863,7 @@
         </div>
       </section>
 
-      <section class="order-4 col-span-12 reveal reveal-delay-3">
+      <section class="order-5 col-span-12 reveal reveal-delay-3">
         <div
           class="motion-panel liquid-panel bg-surface-container-low rounded-xl border border-outline-variant/10 shadow-2xl flex flex-col overflow-hidden">
           <div

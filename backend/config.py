@@ -55,9 +55,14 @@ def _normalize_openrouter_api_key(raw_key: str) -> str:
     if key.lower().startswith("bearer "):
         key = key[7:].strip()
 
-    # OpenRouter keys are case-sensitive in practice and should begin with sk-or-.
+    # OpenRouter keys are case-sensitive and begin with sk-or-.
+    # Preserve the original casing to avoid corrupting the key.
+    if key.startswith("sk-or-") or key.startswith("SK-OR-"):
+        return key
+
     if key.lower().startswith("sk-or-"):
-        key = f"sk-or-{key[6:]}"
+        # Mixed casing — preserve the suffix as-is, normalise prefix to lowercase.
+        return "sk-or-" + key[6:]
 
     return key
 
@@ -101,9 +106,7 @@ def _load_local_env_files() -> None:
 
 
 def _get_openrouter_api_key() -> str:
-    return _normalize_openrouter_api_key(
-        os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
-    )
+    return _normalize_openrouter_api_key(os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY") or "")
 
 
 def _normalize_openrouter_api_base(api_base: str) -> str:
@@ -123,6 +126,11 @@ def _normalize_openrouter_api_base(api_base: str) -> str:
 
 
 _load_local_env_files()
+
+CORS_ALLOW_ORIGINS = os.getenv("CORS_ALLOW_ORIGINS", "*").strip()
+CORS_ALLOW_METHODS = os.getenv("CORS_ALLOW_METHODS", "*").strip()
+CORS_ALLOW_HEADERS = os.getenv("CORS_ALLOW_HEADERS", "*").strip()
+CORS_ALLOW_CREDENTIALS = os.getenv("CORS_ALLOW_CREDENTIALS", "false").strip().lower() in {"true", "1", "yes"}
 
 LOGGER = logging.getLogger("sanitize_pipeline")
 logging.basicConfig(level=logging.INFO)
@@ -160,13 +168,15 @@ TABLE_COLUMN_GAP_MIN_PT = max(2.0, float(os.getenv("TABLE_COLUMN_GAP_MIN_PT", "1
 TABLE_MAX_COLUMN_DRIFT_PT = max(1.0, float(os.getenv("TABLE_MAX_COLUMN_DRIFT_PT", "14.0")))
 TABLE_CONTINUATION_MAX_Y_GAP_MULT = max(1.0, float(os.getenv("TABLE_CONTINUATION_MAX_Y_GAP_MULT", "1.9")))
 
-REDACTION_BOX_TIGHTEN_ENABLED = _env_flag("REDACTION_BOX_TIGHTEN_ENABLED", "1")
-REDACTION_VERTICAL_INSET_RATIO = max(0.0, min(0.45, float(os.getenv("REDACTION_VERTICAL_INSET_RATIO", "0.18"))))
-REDACTION_VERTICAL_INSET_MAX_PT = max(0.0, float(os.getenv("REDACTION_VERTICAL_INSET_MAX_PT", "2.2")))
+REDACTION_BOX_TIGHTEN_ENABLED = _env_flag("REDACTION_BOX_TIGHTEN_ENABLED", "0")
+REDACTION_VERTICAL_INSET_RATIO = max(0.0, min(0.45, float(os.getenv("REDACTION_VERTICAL_INSET_RATIO", "0.0"))))
+REDACTION_VERTICAL_INSET_MAX_PT = max(0.0, float(os.getenv("REDACTION_VERTICAL_INSET_MAX_PT", "0.0")))
 REDACTION_HORIZONTAL_INSET_RATIO = max(0.0, min(0.35, float(os.getenv("REDACTION_HORIZONTAL_INSET_RATIO", "0.0"))))
 REDACTION_HORIZONTAL_INSET_MAX_PT = max(0.0, float(os.getenv("REDACTION_HORIZONTAL_INSET_MAX_PT", "0.0")))
 REDACTION_DYNAMIC_INSET_ENABLED = _env_flag("REDACTION_DYNAMIC_INSET_ENABLED", "1")
 REDACTION_MIN_SAFE_GAP_PT = max(0.0, float(os.getenv("REDACTION_MIN_SAFE_GAP_PT", "0.3")))
+REDACTION_PADDING_X_PT = max(0.0, float(os.getenv("REDACTION_PADDING_X_PT", "0.8")))
+REDACTION_PADDING_Y_PT = max(0.0, float(os.getenv("REDACTION_PADDING_Y_PT", "1.2")))
 
 IGNORE_JSON_KEYS: Set[str] = {"id", "filename", "metadata.item", "input.ke"}
 BUSINESS_KEYWORD_PATTERN = re.compile(
@@ -174,9 +184,7 @@ BUSINESS_KEYWORD_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 
-JOB_STORAGE_DIR = Path(
-    os.getenv("SANITIZE_JOB_STORAGE_DIR", str(Path(tempfile.gettempdir()) / "snv-pii-redact-jobs"))
-)
+JOB_STORAGE_DIR = Path(os.getenv("SANITIZE_JOB_STORAGE_DIR", str(Path(tempfile.gettempdir()) / "snv-pii-redact-jobs")))
 
 US_STATE_NAMES = {
     "alabama",

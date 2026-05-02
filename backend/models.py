@@ -1,7 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Literal, Optional, Sequence, Tuple
+
+EngineSource = Literal["Presidio", "LLM", "Vision"]
+DetectionSource = Literal["Presidio", "LLM", "Hybrid", "Vision"]
+
+
+@dataclass
+class Detection:
+    entity_text: str
+    entity_type: str
+    confidence_score: float
+    source: DetectionSource
+    boxes: List[BoundingBox]
+    supporting_sources: List[EngineSource] = field(default_factory=list)
+    decision_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)

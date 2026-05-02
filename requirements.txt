@@ -14,6 +14,7 @@ rapidfuzz==3.9.7
 
 requests==2.32.3
 datasets==2.21.0
+opencv-python-headless==4.10.0.84
 
 # Required external runtime dependencies:
 # 1) Tesseract OCR binary installed and available on PATH

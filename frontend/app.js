@@ -224,7 +224,9 @@ async function enqueueJob() {
     try {
     const payload = new FormData();
     payload.append("file", state.selectedFile, state.selectedFile.name);
-    pushNotification("info", "Sanitization started", "Uploading document and creating job.");
+    const faceDetectionEnabled = document.getElementById("faceDetectionToggle")?.checked ?? true;
+    payload.append("enable_face_detection", faceDetectionEnabled ? "1" : "0");
+    pushNotification("info", "Sanitization started", `Face detection ${faceDetectionEnabled ? "enabled" : "disabled"}.`);
     startTimer();
 
     const response = await fetch(state.apiUrl, {
@@ -595,6 +597,7 @@ function render() {
   renderSelectedEntity(entities);
   renderOutput(status);
   renderTopPanels(status, jobId, entities, warnings);
+  renderPipelineTimings();
 }
 
 function notifyStatusTransition(status) {
@@ -1091,6 +1094,65 @@ function formatPercent(value) {
   }
   const percent = Math.max(0, Math.min(1, normalized)) * 100;
   return `${percent.toFixed(1)}%`;
+}
+
+function renderPipelineTimings() {
+  const container = document.getElementById("pipelineTimingContainer");
+  if (!container) return;
+
+  const timings = state.jobStatus?.timings;
+  if (!timings || Object.keys(timings).length === 0) {
+    container.innerHTML = '<div class="text-on-surface-variant">Waiting for timing data...</div>';
+    return;
+  }
+
+  const maxTime = Math.max(0.01, ...Object.values(timings));
+  const stageLabels = {
+    ocr: "OCR",
+    char_map: "Char Map",
+    presidio: "Presidio",
+    llm: "LLM",
+    llm_api: "LLM API",
+    llm_parse: "LLM Parse",
+    llm_parse_strip: "  Strip",
+    llm_parse_extract: "  Extract",
+    llm_parse_json: "  JSON Load",
+    llm_parse_fallback: "  Fallback",
+    llm_fuzzy: "LLM Fuzzy",
+    llm_bbox: "LLM BBox",
+    contextual_rules: "Context",
+    dedup: "Dedup",
+    face_detection: "Face",
+    redaction: "Redaction",
+    font_subset: "Font",
+    dedup_final: "Dedup Final",
+  };
+
+  const activeStages = Object.entries(timings).filter(([, t]) => t > 0);
+  const total = activeStages.reduce((s, [, t]) => s + t, 0);
+
+  const bars = activeStages
+    .map(([key, seconds]) => {
+      const label = stageLabels[key] || key;
+      const pct = ((seconds / maxTime) * 80).toFixed(0);
+      return `<div class="flex items-center gap-2">
+        <span class="w-24 text-right text-on-surface-variant text-[10px] uppercase tracking-wider">${label}</span>
+        <div class="flex-1 h-4 bg-surface-container-highest rounded-full overflow-hidden">
+          <div class="h-full rounded-full" style="width:${pct}%;background:linear-gradient(90deg,rgba(245,158,11,0.7),#F59E0B)"></div>
+        </div>
+        <span class="w-14 text-left text-primary font-bold text-[10px] font-mono">${seconds.toFixed(1)}s</span>
+      </div>`;
+    })
+    .join("");
+
+  container.innerHTML = `
+    ${bars}
+    <div class="flex items-center gap-2 pt-2 border-t border-outline-variant/10 mt-2">
+      <span class="w-24 text-right text-on-surface-variant text-[10px] uppercase tracking-wider font-bold">Total</span>
+      <div class="flex-1"></div>
+      <span class="w-14 text-left text-primary font-bold text-[11px] font-mono">${total.toFixed(1)}s</span>
+    </div>
+  `;
 }
 
 function escapeHtml(value) {
